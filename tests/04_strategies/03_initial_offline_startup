@@ -1,0 +1,75 @@
+Testing init-time ifup keeps an initially offline interface out of strategies until tracking validates it.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x3F00"
+		}
+	],
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"family": ["ipv4"],
+			"id": "1",
+			"table_id": "1",
+			"mark": "0x100",
+			"initial_state": "offline",
+			"track_ip": ["1.1.1.1"]
+		}
+	],
+	"route": [
+		{
+			".name": "wan_m1_w1",
+			"interface": "wan",
+			"metric": "1",
+			"weight": "1"
+		}
+	],
+	"strategy": [
+		{
+			".name": "wan_only",
+			"use_route": ["wan_m1_w1"]
+		}
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.init();
+m.update_iface_to_table();
+
+// Match init_setup.uc ordering: interface setup precedes tracker-state seeding.
+m.ifup('wan', 'init');
+print('state after ifup: ' + m.get_iface_hotplug_state('wan') + '\n');
+
+m.init_iface_hotplug_states();
+m.nft_file('create', 'dynamic');
+m.set_strategies_nftables();
+m.nft_file('install', 'dynamic');
+
+let dynamic = global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft');
+print('unvalidated wan selected: ' + (index(dynamic, 'meta mark set 0x100 comment "wan 1 1"') >= 0) + '\n');
+
+global.mocklib.capture('/var/run/mwan4track/wan_ipv4/STATUS', 'online\n');
+m.init_iface_hotplug_states();
+m.nft_file('create', 'dynamic');
+m.set_strategies_nftables();
+m.nft_file('install', 'dynamic');
+
+dynamic = global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft');
+print('state after validation: ' + m.get_iface_hotplug_state('wan') + '\n');
+print('validated wan selected: ' + (index(dynamic, 'meta mark set 0x100 comment "wan 1 1"') >= 0) + '\n');
+-- End --
+
+-- Expect stdout --
+state after ifup: offline
+unvalidated wan selected: false
+state after validation: online
+validated wan selected: true
+-- End --
