@@ -21,19 +21,77 @@ jobs:
       matrix:
         include:
           - version: openwrt-24.10
-            target: x86_64
-          - version: openwrt-24.10
             target: aarch64_cortex-a53
+          - version: openwrt-24.10
+            target: aarch64_cortex-a72
+          - version: openwrt-24.10
+            target: aarch64_cortex-a76
           - version: openwrt-24.10
             target: aarch64_generic
           - version: openwrt-24.10
+            target: arm_arm1176jzf-s_vfp
+          - version: openwrt-24.10
+            target: arm_arm926ej-s
+          - version: openwrt-24.10
+            target: arm_cortex-a15_neon-vfpv4
+          - version: openwrt-24.10
+            target: arm_cortex-a5_vfpv4
+          - version: openwrt-24.10
             target: arm_cortex-a7
+          - version: openwrt-24.10
+            target: arm_cortex-a7_neon-vfpv4
+          - version: openwrt-24.10
+            target: arm_cortex-a7_vfpv4
+          - version: openwrt-24.10
+            target: arm_cortex-a8_vfpv3
           - version: openwrt-24.10
             target: arm_cortex-a9
           - version: openwrt-24.10
+            target: arm_cortex-a9_neon
+          - version: openwrt-24.10
+            target: arm_cortex-a9_vfpv3-d16
+          - version: openwrt-24.10
+            target: arm_fa526
+          - version: openwrt-24.10
+            target: arm_xscale
+          - version: openwrt-24.10
+            target: armeb_xscale
+          - version: openwrt-24.10
+            target: i386_pentium-mmx
+          - version: openwrt-24.10
+            target: i386_pentium4
+          - version: openwrt-24.10
+            target: loongarch64_generic
+          - version: openwrt-24.10
+            target: mips64_mips64r2
+          - version: openwrt-24.10
+            target: mips64_octeonplus
+          - version: openwrt-24.10
+            target: mips64el_mips64r2
+          - version: openwrt-24.10
             target: mips_24kc
           - version: openwrt-24.10
+            target: mips_4kec
+          - version: openwrt-24.10
+            target: mips_mips32
+          - version: openwrt-24.10
             target: mipsel_24kc
+          - version: openwrt-24.10
+            target: mipsel_24kc_24kf
+          - version: openwrt-24.10
+            target: mipsel_74kc
+          - version: openwrt-24.10
+            target: mipsel_mips32
+          - version: openwrt-24.10
+            target: powerpc64_e5500
+          - version: openwrt-24.10
+            target: powerpc_464fp
+          - version: openwrt-24.10
+            target: powerpc_8548
+          - version: openwrt-24.10
+            target: riscv64_riscv64
+          - version: openwrt-24.10
+            target: x86_64
           - version: openwrt-25.12
             target: aarch64_cortex-a53
           - version: openwrt-25.12
@@ -134,11 +192,18 @@ jobs:
 
       - name: 🧮 Compute ARCH
         run: |
-          if [ "${{ matrix.version }}" = "snapshots" ]; then
-            echo "ARCH=${{ matrix.target }}-SNAPSHOT" >> "$GITHUB_ENV"
-          else
-            echo "ARCH=${{ matrix.target }}-${{ matrix.version }}" >> "$GITHUB_ENV"
-          fi
+          # matrix.version is the release-line LABEL baked into artifact filenames
+          # (sync_repo.sh matches *_openwrt-25.12_*), NOT the SDK image tag. Pin the
+          # SDK to a specific STABLE point release so builds are reproducible and
+          # immune to <ver>-SNAPSHOT mirror churn (rotated/truncated tarballs →
+          # sha256 mismatch). Bump these when a new point release ships.
+          case "${{ matrix.version }}" in
+            openwrt-25.12) SDK_VERSION="25.12.5" ;;
+            openwrt-24.10) SDK_VERSION="24.10.7" ;;
+            snapshots)     SDK_VERSION="SNAPSHOT" ;;
+            *)             SDK_VERSION="${{ matrix.version }}" ;;
+          esac
+          echo "ARCH=${{ matrix.target }}-${SDK_VERSION}" >> "$GITHUB_ENV"
 
       - name: 🏗️ Build with OpenWrt SDK
         uses: openwrt/gh-action-sdk@v8
@@ -171,14 +236,16 @@ jobs:
           PKG_VERSION=$(grep -E '^PKG_VERSION *:?=' Makefile | head -n1 | cut -d= -f2 | tr -d '[:space:]')
           PKG_RELEASE=$(grep -E '^PKG_RELEASE *:?=' Makefile | head -n1 | cut -d= -f2 | tr -d '[:space:]')
           for ext in ipk apk; do
+            # apk keeps OpenWrt's 'r' release prefix (…-r5.apk); opkg does not
+            case "$ext" in apk) REL="r${PKG_RELEASE}" ;; *) REL="${PKG_RELEASE}" ;; esac
             for f in $(find bin/packages -type f -path "*/melmac/*.${ext}"); do
               dir=$(dirname "$f")
-                mv -v "$f" "$dir/${PKG_NAME}-${PKG_VERSION}-${PKG_RELEASE}_${{ matrix.version }}_${{ matrix.target }}.${ext}"
+                mv -v "$f" "$dir/${PKG_NAME}-${PKG_VERSION}-${REL}_${{ matrix.version }}_${{ matrix.target }}.${ext}"
             done
           done
 
       - name: 📦 Upload artifact for ${{ matrix.target }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.PKG_NAME }}-${{ matrix.target }}-${{ matrix.version }}
           path: |
@@ -209,7 +276,7 @@ jobs:
           echo "version=$COMBINED_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: ⬇️ Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ./release-assets
 
@@ -225,3 +292,34 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 🧹 Prune stale release assets
+        # Delete assets on the tag that THIS build did not produce, so an arch or
+        # release line you stopped building no longer lingers on the release (and
+        # no longer gets re-published by sync_repo.sh, which pulls from releases).
+        # Gated on a fully green build + a non-empty keep set so a transient arch
+        # failure or an empty build can never wipe a still-good binary.
+        if: needs.build.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          keep=$(find release-assets -type f \( -name '*.ipk' -o -name '*.apk' \) \
+            -exec basename {} \; | sort -u)
+          [ -n "$keep" ] || { echo "no packages built — skipping prune"; exit 0; }
+          gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r a; do
+            case "$a" in *.ipk|*.apk) ;; *) continue ;; esac
+            printf '%s\n' "$keep" | grep -qxF -- "$a" || {
+              echo "pruning stale asset: $a"
+              gh release delete-asset "$TAG" "$a" --yes
+            }
+          done
+      - name: 🔔 Notify repo.mossdef.org
+        # Event-driven sync: ping the repo so it publishes this release immediately
+        # instead of waiting for its hourly poll. Non-fatal if the token is absent.
+        if: needs.build.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_DISPATCH_TOKEN }}
+        run: |
+          gh api -X POST /repos/mossdef-org/repo.mossdef.org/dispatches \
+            -f event_type=package-released \
+            || echo "dispatch failed — repo.mossdef.org still syncs on its hourly schedule"
