@@ -8,6 +8,8 @@ import m from 'mwan4';
 
 function println(s) { print(s + '\n'); }
 
+function print_json(data) { printf('%J\n', data); }
+
 function command_help(cmd, help) {
 	printf("%-25s%s\n", cmd, help);
 }
@@ -19,12 +21,17 @@ function cmd_help() {
 	command_help('start',            'Load nft rules, ip rules and ip routes');
 	command_help('stop',             'Unload nft rules, ip rules and ip routes');
 	command_help('restart',          'Reload nft rules, ip rules and ip routes');
+	command_help('reload',           'Reload nft rules, ip rules and ip routes');
 	command_help('ifup <iface>',     'Load rules and routes for specific interface');
 	command_help('ifdown <iface>',   'Unload rules and routes for specific interface');
 	command_help('interfaces',       'Show interfaces status');
 	command_help('strategies',       'Show currently active strategy');
 	command_help('connected',        'Show directly connected networks');
 	command_help('rules',            'Show active rules');
+	command_help('tunnels',          'Show tunnel metadata and underlay warnings');
+	command_help('diagnostics',      'Show status warnings and suggested actions');
+	command_help('capabilities',     'Show backend RPC capabilities as JSON');
+	command_help('validate',         'Validate configuration as JSON');
 	command_help('status',           'Show all status');
 	command_help('internal <ipv4|ipv6>', 'Show internal configuration <default: ipv4>');
 	command_help('use <iface> <cmd>', 'Run a command bound to <iface> and avoid mwan4 rules');
@@ -39,6 +46,10 @@ function cmd_ifdown(args) {
 		println('Error: Too many arguments. Usage: mwan4 ifdown <interface>');
 		return;
 	}
+	if (!m.validate_section_name(args[0])) {
+		println('Error: Invalid interface. Usage: mwan4 ifdown <interface>');
+		return;
+	}
 	m.interface_hotplug_shutdown(args[0], true);
 }
 
@@ -49,6 +60,10 @@ function cmd_ifup(args) {
 	}
 	if (length(args) > 1) {
 		println('Error: Too many arguments. Usage: mwan4 ifup <interface>');
+		return;
+	}
+	if (!m.validate_section_name(args[0])) {
+		println('Error: Invalid interface. Usage: mwan4 ifup <interface>');
 		return;
 	}
 	m.ifup(args[0], 'cmd');
@@ -100,8 +115,35 @@ function cmd_rules() {
 	}
 }
 
+function cmd_tunnels() {
+	println('Tunnel interfaces:');
+	for (let line in m.report_tunnels())
+		println(line);
+	println('');
+}
+
+function cmd_diagnostics() {
+	println('Status diagnostics:');
+	for (let line in m.report_status_diagnostics())
+		println(line);
+	println('');
+}
+
+function cmd_capabilities() {
+	print_json(m.get_capabilities());
+	return 0;
+}
+
+function cmd_validate() {
+	let result = m.validate_config();
+	print_json(result);
+	return result.valid ? 0 : 1;
+}
+
 function cmd_status() {
+	cmd_diagnostics();
 	cmd_interfaces();
+	cmd_tunnels();
 	cmd_strategies();
 	cmd_connected();
 	cmd_rules();
@@ -117,6 +159,10 @@ function run_cmd(c) {
 
 function cmd_internal(args) {
 	let family = args?.[0] || 'ipv4';
+	if (!m.validate_family(family)) {
+		println('Error: Invalid family. Usage: mwan4 internal <ipv4|ipv6>');
+		return;
+	}
 	let dash = '-------------------------------------------------';
 
 	let release = 'unknown';
@@ -177,20 +223,24 @@ function cmd_internal(args) {
 	println(length(output) ? output : 'No data found');
 }
 
-function shell_quote(s) {
-	return "'" + replace(s, "'", "'\\''") + "'";
-}
-
 function cmd_use(args) {
 	if (length(args) < 2) {
 		println('Error: Usage: mwan4 use <interface> <command> [args...]');
 		return 1;
 	}
 	let iface = shift(args);
+	if (!m.validate_section_name(iface)) {
+		warn(sprintf('invalid interface %s\n', iface));
+		return 1;
+	}
 	let st = m.ubus_call('network.interface.' + iface, 'status');
 	let device = st?.l3_device || st?.device;
 	if (!device) {
 		warn(sprintf('could not find device for %s\n', iface));
+		return 1;
+	}
+	if (!m.validate_device_name(device)) {
+		warn(sprintf('invalid device for %s\n', iface));
 		return 1;
 	}
 	let src_ip = m.get_src_ip(iface);
@@ -198,13 +248,20 @@ function cmd_use(args) {
 		warn(sprintf('could not find src_ip for %s\n', iface));
 		return 1;
 	}
-	let family = m.uci_get(iface, 'family') || 'ipv4';
+	let families = m.get_families(iface);
+	let family = families[0] || 'ipv4';
+	if (!m.validate_family(family)) {
+		warn(sprintf('invalid family for %s\n', iface));
+		return 1;
+	}
 	let fwmark = m.mmx_default;
 
-	let quoted_args = map(args, shell_quote);
+	let quoted_args = [];
+	for (let arg in args)
+		push(quoted_args, m.shell_quote(arg));
 	let cmd = sprintf(
 		'FAMILY=%s DEVICE=%s SRCIP=%s FWMARK=%s LD_PRELOAD=/lib/mwan4/libwrap_mwan4_sockopt.so.1.0 %s',
-		family, device, src_ip, fwmark, join(' ', quoted_args));
+		m.shell_quote(family), m.shell_quote(device), m.shell_quote(src_ip), m.shell_quote(fwmark), join(' ', quoted_args));
 
 	warn(sprintf("Running '%s' with DEVICE=%s SRCIP=%s FWMARK=%s FAMILY=%s\n",
 		join(' ', args), device, src_ip, fwmark, family));
@@ -227,6 +284,10 @@ function cmd_restart() {
 	system('/etc/init.d/mwan4 start');
 }
 
+function cmd_reload() {
+	system('/etc/init.d/mwan4 reload');
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 m.set_scriptname('mwan4');
@@ -242,10 +303,15 @@ case 'interfaces':
 case 'strategies':
 case 'connected':
 case 'rules':
+case 'tunnels':
+case 'diagnostics':
+case 'capabilities':
+case 'validate':
 case 'status':
 case 'start':
 case 'stop':
 case 'restart':
+case 'reload':
 case 'internal':
 	m.init();
 	switch (cmd) {
@@ -256,10 +322,15 @@ case 'internal':
 	case 'strategies':  cmd_strategies(); break;
 	case 'connected':   cmd_connected(); break;
 	case 'rules':       cmd_rules(); break;
+	case 'tunnels':     cmd_tunnels(); break;
+	case 'diagnostics': cmd_diagnostics(); break;
+	case 'capabilities': exit(cmd_capabilities()); break;
+	case 'validate':     exit(cmd_validate()); break;
 	case 'status':      cmd_status(); break;
 	case 'start':       cmd_start(); break;
 	case 'stop':        cmd_stop(); break;
 	case 'restart':     cmd_restart(); break;
+	case 'reload':      cmd_reload(); break;
 	case 'internal':    cmd_internal(args); break;
 	}
 	break;

@@ -1,0 +1,12 @@
+{
+	"mwan4": {
+		"instances": {
+			"mwan4": {
+				"running": true
+			},
+			"track_wan_ipv4": {
+				"running": true
+			}
+		}
+	}
+}

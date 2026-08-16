@@ -2,13 +2,17 @@
 	"globals": [
 		{
 			".name": "globals",
-			"mmx_mask": "0x3F00"
+			"mmx_mask": "0x3F00",
+			"source_routing": "0"
 		}
 	],
 	"interface": [
 		{
 			".name": "wan",
 			"enabled": "1",
+			"id": "1",
+			"table_id": "1",
+			"mark": "0x100",
 			"track_ip": ["1.0.0.1", "1.1.1.1", "208.67.222.222", "208.67.220.220"],
 			"family": ["ipv4"],
 			"reliability": "2"
@@ -16,6 +20,9 @@
 		{
 			".name": "wan6",
 			"enabled": "0",
+			"id": "2",
+			"table_id": "2",
+			"mark": "0x200",
 			"track_ip": ["2606:4700:4700::1001", "2606:4700:4700::1111", "2620:0:ccd::2", "2620:0:ccc::2"],
 			"family": ["ipv6"],
 			"reliability": "2"
@@ -23,6 +30,9 @@
 		{
 			".name": "wanb",
 			"enabled": "0",
+			"id": "3",
+			"table_id": "3",
+			"mark": "0x300",
 			"track_ip": ["1.0.0.1", "1.1.1.1", "208.67.222.222", "208.67.220.220"],
 			"family": ["ipv4"],
 			"reliability": "1"
@@ -30,6 +40,9 @@
 		{
 			".name": "wanb6",
 			"enabled": "0",
+			"id": "4",
+			"table_id": "4",
+			"mark": "0x400",
 			"track_ip": ["2606:4700:4700::1001", "2606:4700:4700::1111", "2620:0:ccd::2", "2620:0:ccc::2"],
 			"family": ["ipv6"],
 			"reliability": "1"

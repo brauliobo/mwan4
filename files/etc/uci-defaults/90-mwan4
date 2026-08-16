@@ -16,8 +16,85 @@ fi
 # options: use_member->use_route, use_policy->use_strategy
 # option family -> list family (interfaces and rules)
 # option flush_conntrack 'always'/'never' -> list flush_conntrack
+# globals: legacy dotted aliases -> canonical plain options
+# interface ids: seed id/table_id/mark from the current section order
 
 . /lib/functions.sh
+
+mwan4_interface_index=0
+mwan4_mmx_mask='0x3F00'
+
+is_positive_int() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+
+	[ "$1" -gt 0 ] 2>/dev/null
+}
+
+id_to_mark() {
+	local id="$1"
+	local mask="$2"
+	local bit=0
+	local bit_val=0
+	local result=0
+	local m
+	local v
+
+	case "$mask" in
+		0x[0-9A-Fa-f]*|[0-9]*) ;;
+		*) mask='0x3F00' ;;
+	esac
+
+	m=$((mask))
+	v=$((id))
+
+	while [ "$bit" -lt 32 ]; do
+		if [ $(((m >> bit) & 1)) -eq 1 ]; then
+			if [ $(((v >> bit_val) & 1)) -eq 1 ]; then
+				result=$((result | (1 << bit)))
+			fi
+			bit_val=$((bit_val + 1))
+		fi
+		bit=$((bit + 1))
+	done
+
+	printf '0x%x' "$result"
+}
+
+get_dotted_global_alias() {
+	local name="$1"
+	local alias="$2"
+
+	uci -q get "mwan4.$name.$alias" 2>/dev/null
+}
+
+migrate_global_option() {
+	local name="$1"
+	local option="$2"
+	local alias="$3"
+	local value
+	local alias_value
+
+	config_get value "$name" "$option"
+	alias_value="$(get_dotted_global_alias "$name" "$alias")"
+
+	if [ -z "$value" ] && [ -n "$alias_value" ]; then
+		uci_set mwan4 "$name" "$option" "$alias_value"
+		value="$alias_value"
+	fi
+
+	[ "$option" = mmx_mask ] && [ -n "$value" ] && mwan4_mmx_mask="$value"
+
+	[ -n "$alias_value" ] && uci -q delete "mwan4.$name.$alias" 2>/dev/null
+}
+
+migrate_globals() {
+	local name="$1"
+
+	migrate_global_option "$name" mmx_mask mwan4.mmx_mask
+	migrate_global_option "$name" source_routing mwan4.source_routing
+}
 
 # Migrate 'member' section type to 'route'
 migrate_member() {
@@ -86,15 +163,41 @@ migrate_rule() {
 # Migrate interface options
 migrate_interface() {
 	local name="$1"
+	local id
+	local table_id
+	local mark
+
+	mwan4_interface_index=$((mwan4_interface_index + 1))
+
+	config_get id "$name" id
+	if ! is_positive_int "$id"; then
+		id="$mwan4_interface_index"
+		uci_set mwan4 "$name" id "$id"
+	fi
+
+	config_get table_id "$name" table_id
+	if ! is_positive_int "$table_id"; then
+		uci_set mwan4 "$name" table_id "$id"
+	fi
+
+	config_get mark "$name" mark
+	if [ -z "$mark" ]; then
+		uci_set mwan4 "$name" mark "$(id_to_mark "$id" "$mwan4_mmx_mask")"
+	fi
+
 	migrate_family "$name"
 	migrate_flush_conntrack "$name"
 }
 
 config_load mwan4
+config_foreach migrate_globals globals
+config_get loaded_mmx_mask globals mmx_mask
+[ -n "$loaded_mmx_mask" ] && mwan4_mmx_mask="$loaded_mmx_mask"
 config_foreach migrate_member member
 config_foreach migrate_policy policy
 config_foreach migrate_rule rule
 config_foreach migrate_interface interface
+
 uci_commit mwan4
 
 exit 0

@@ -23,18 +23,30 @@ table inet fw4 {
 		flags timeout
 		timeout 600s
 	}
+
+	counter mwan4_counter_rule_https_ipv4 {
+	}
+
+	counter mwan4_counter_rule_default_rule_v4_ipv4 {
+	}
+
+	counter mwan4_counter_rule_https_ipv6 {
+	}
+
+	counter mwan4_counter_rule_default_rule_v6_ipv6 {
+	}
 	chain mwan4_rule_https_ipv4 {
 		meta mark & 0x3f00 == 0 meta mark set ip saddr map @mwan4_rule_ipv4_https
 		meta mark & 0x3f00 == 0 jump mwan4_strategy_balanced_ipv4
 		meta mark & 0x3f00 != 0 meta mark & 0x3f00 != 0x3f00 update @mwan4_rule_ipv4_https { ip saddr : meta mark }
 	}
 	chain mwan4_rules_ipv4 {
-		meta l4proto tcp tcp dport { 443 } meta mark & 0x3f00 == 0 jump mwan4_rule_https_ipv4 comment "https"
-		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 jump mwan4_strategy_balanced_ipv4 comment "default_rule_v4"
+		meta l4proto tcp tcp dport { 443 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_https_ipv4 jump mwan4_rule_https_ipv4 comment "https"
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_default_rule_v4_ipv4 jump mwan4_strategy_balanced_ipv4 comment "default_rule_v4"
 	}
 	chain mwan4_rules_ipv6 {
-		meta l4proto tcp tcp dport { 443 } meta mark & 0x3f00 == 0 jump mwan4_strategy_balanced_ipv6 comment "https"
-		ip6 daddr ::/0 meta mark & 0x3f00 == 0 jump mwan4_strategy_balanced_ipv6 comment "default_rule_v6"
+		meta l4proto tcp tcp dport { 443 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_https_ipv6 jump mwan4_strategy_balanced_ipv6 comment "https"
+		ip6 daddr ::/0 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_default_rule_v6_ipv6 jump mwan4_strategy_balanced_ipv6 comment "default_rule_v6"
 	}
 }
 -- End --

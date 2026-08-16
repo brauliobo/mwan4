@@ -1,0 +1,101 @@
+Testing tunnel endpoint host-route exemption planning and constrained advanced apply control.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x3F00"
+		}
+	],
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"id": "1",
+			"table_id": "1",
+			"family": ["ipv4"]
+		},
+		{
+			".name": "tun0",
+			"enabled": "1",
+			"id": "2",
+			"table_id": "2",
+			"family": ["ipv4"],
+			"type": "tunnel",
+			"transport_type": "wireguard",
+			"underlay_strategy": "wan_only",
+			"endpoint_host": "198.51.100.10",
+			"prevent_recursion": "1"
+		}
+	],
+	"route": [
+		{
+			".name": "wan_route",
+			"interface": "wan",
+			"metric": "1",
+			"weight": "1"
+		}
+	],
+	"strategy": [
+		{
+			".name": "wan_only",
+			"use_route": ["wan_route"]
+		}
+	],
+	"rule": []
+}
+-- End --
+
+-- File ubus/network.interface.wan~status.json --
+{
+	"up": true,
+	"l3_device": "eth1",
+	"device": "eth1"
+}
+-- End --
+
+-- File ubus/network.interface.tun0~status.json --
+{
+	"up": true,
+	"l3_device": "tun0",
+	"device": "tun0"
+}
+-- End --
+
+-- File fs/popen~ip_-4_route_get_198_51_100_10_2_dev_null.txt --
+198.51.100.10 via 10.0.0.1 dev eth1 src 10.0.0.2
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.load();
+
+let tunnels = m.get_diagnostics({ section: 'tunnels' }).diagnostics.tunnels;
+let exemption = tunnels.exemptions.tun0;
+print('exemption endpoint: ' + exemption.endpoint + '\n');
+print('exemption underlay: ' + exemption.underlay + '\n');
+print('exemption command: ' + exemption.command + '\n');
+
+let calls = [];
+global.system = function(command) {
+	push(calls, command);
+	return 0;
+};
+
+let result = m.advanced_control({ action: 'apply_tunnel_exemptions', interface: 'tun0' });
+print('apply ok: ' + result.ok + '\n');
+print('applied count: ' + length(result.applied) + '\n');
+print('calls: ' + join('|', calls) + '\n');
+-- End --
+
+-- Expect stdout --
+exemption endpoint: 198.51.100.10
+exemption underlay: wan
+exemption command: ip -4 route replace table 1 '198.51.100.10/32' via '10.0.0.1' dev 'eth1' src '10.0.0.2'
+apply ok: true
+applied count: 1
+calls: ip -4 route replace table 1 '198.51.100.10/32' via '10.0.0.1' dev 'eth1' src '10.0.0.2' >/dev/null 2>&1
+-- End --

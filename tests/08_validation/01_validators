@@ -1,0 +1,69 @@
+Testing shared validators for UCI values that reach shell or nft contexts.
+
+-- Testcase --
+import m from 'mwan4';
+
+print('section_good: ' + m.validate_section_name('wan_vivo6') + '\n');
+print('section_bad_shell: ' + m.validate_section_name('wan;touch /tmp/pwn') + '\n');
+print('section_bad_path: ' + m.validate_section_name('../wan') + '\n');
+print('family_ipv4: ' + m.validate_family('ipv4') + '\n');
+print('family_bad: ' + m.validate_family('ipv4; nft flush ruleset') + '\n');
+print('track_method_ping: ' + m.validate_track_method_name('ping') + '\n');
+print('track_method_nping_tcp: ' + m.validate_track_method_name('nping-tcp') + '\n');
+print('track_method_bad: ' + m.validate_track_method_name('nping-tcp;touch') + '\n');
+print('track_target_ipv4: ' + m.validate_track_target('1.1.1.1') + '\n');
+print('track_target_host: ' + m.validate_track_target('one.one.one.one') + '\n');
+print('track_target_bad: ' + m.validate_track_target('1.1.1.1;touch /tmp/pwn') + '\n');
+print('route_table_number: ' + m.validate_route_table_lookup('100') + '\n');
+print('route_table_name: ' + m.validate_route_table_lookup('vpn_wan') + '\n');
+print('route_table_bad: ' + m.validate_route_table_lookup('100;ip route flush table main') + '\n');
+print('proto_tcp: ' + m.validate_protocol('tcp') + '\n');
+print('proto_number: ' + m.validate_protocol('6') + '\n');
+print('proto_bad: ' + m.validate_protocol('tcp; counter accept') + '\n');
+print('ports_single: ' + m.validate_ports('443') + '\n');
+print('ports_list_range: ' + m.validate_ports('80,443-445') + '\n');
+print('ports_bad: ' + m.validate_ports('443 } counter accept') + '\n');
+print('loglevel_notice: ' + m.validate_loglevel('notice') + '\n');
+print('loglevel_bad: ' + m.validate_loglevel('notice;touch') + '\n');
+print('mptcp_id_good: ' + m.validate_mptcp_endpoint_id('10') + '\n');
+print('mptcp_id_bad: ' + m.validate_mptcp_endpoint_id('0') + '\n');
+print('mptcp_address_good: ' + m.validate_mptcp_address('2001:db8::10') + '\n');
+print('mptcp_address_bad: ' + m.validate_mptcp_address('2001:db8::10;touch') + '\n');
+print('mptcp_flag_good: ' + m.validate_mptcp_flag('subflow') + '\n');
+print('mptcp_flag_bad: ' + m.validate_mptcp_flag('subflow;touch') + '\n');
+print('nft_id_good: ' + m.validate_nft_identifier('mwan4_rule_https') + '\n');
+print('nft_id_bad: ' + m.validate_nft_identifier('bad;flush') + '\n');
+-- End --
+
+-- Expect stdout --
+section_good: true
+section_bad_shell: false
+section_bad_path: false
+family_ipv4: true
+family_bad: false
+track_method_ping: true
+track_method_nping_tcp: true
+track_method_bad: false
+track_target_ipv4: true
+track_target_host: true
+track_target_bad: false
+route_table_number: true
+route_table_name: true
+route_table_bad: false
+proto_tcp: true
+proto_number: true
+proto_bad: false
+ports_single: true
+ports_list_range: true
+ports_bad: false
+loglevel_notice: true
+loglevel_bad: false
+mptcp_id_good: true
+mptcp_id_bad: false
+mptcp_address_good: true
+mptcp_address_bad: false
+mptcp_flag_good: true
+mptcp_flag_bad: false
+nft_id_good: true
+nft_id_bad: false
+-- End --

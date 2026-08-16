@@ -1,0 +1,320 @@
+Testing advanced diagnostics contracts for MPTCP, quality, probes, VRF, grouped counters, tunnels, and explain.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x3F00"
+		}
+	],
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"id": "1",
+			"table_id": "1",
+			"mark": "0x100",
+			"track_ip": ["1.1.1.1", "9.9.9.9"],
+			"family": ["ipv4"],
+			"reliability": "1",
+			"check_quality": "1",
+			"failure_latency": "1000",
+			"failure_loss": "50",
+			"recovery_latency": "200",
+			"recovery_loss": "5"
+		},
+		{
+			".name": "wg0",
+			"enabled": "1",
+			"id": "2",
+			"table_id": "2",
+			"mark": "0x200",
+			"family": ["ipv4"],
+			"type": "tunnel",
+			"transport_type": "wireguard",
+			"underlay_strategy": "wg_underlay",
+			"endpoint_host": "192.0.2.10",
+			"endpoint_port": "51820",
+			"prevent_recursion": "1"
+		}
+	],
+	"route": [
+		{
+			".name": "wan_route",
+			"interface": "wan",
+			"metric": "1",
+			"weight": "1"
+		},
+		{
+			".name": "wg_route",
+			"interface": "wg0",
+			"metric": "1",
+			"weight": "1"
+		}
+	],
+	"strategy": [
+		{
+			".name": "balanced",
+			"use_route": ["wan_route"]
+		},
+		{
+			".name": "wg_underlay",
+			"use_route": ["wg_route"]
+		}
+	],
+	"rule": [
+		{
+			".name": "default_rule_v4",
+			"dest_ip": "0.0.0.0/0",
+			"use_strategy": "balanced",
+			"family": ["ipv4"]
+		}
+	]
+}
+-- End --
+
+-- File ubus/network.interface.wg0~status.json --
+{
+	"up": true,
+	"l3_device": "wg0",
+	"device": "wg0",
+	"ipv4-address": [
+		{
+			"address": "10.7.0.2",
+			"mask": 24
+		}
+	]
+}
+-- End --
+
+-- File fs/open~_proc_sys_net_mptcp_enabled.txt --
+1
+-- End --
+
+-- File fs/popen~ip_mptcp_endpoint_show_2_dev_null.txt --
+192.0.2.10 id 1 subflow dev eth0
+2001:db8::10 id 2 signal,backup dev eth1
+-- End --
+
+-- File fs/popen~ip_mptcp_limits_show_2_dev_null.txt --
+add_addr_accepted 4 subflows 2
+-- End --
+
+-- File fs/popen~command_-v_nslookup_2_dev_null.txt --
+/usr/bin/nslookup
+-- End --
+
+-- File fs/popen~command_-v_vtysh_2_dev_null.txt --
+/usr/bin/vtysh
+-- End --
+
+-- File fs/popen~vtysh_-c_show_bfd_peers_json_2_dev_null.txt --
+{
+	"peers": {
+		"192.0.2.1": [
+			{
+				"status": "up",
+				"interface": "wan",
+				"vrf": "default"
+			}
+		]
+	}
+}
+-- End --
+
+-- File ubus/service~list~name-frr.json --
+{
+	"frr": {
+		"instances": {
+			"bfdd": {
+				"running": true
+			}
+		}
+	}
+}
+-- End --
+
+-- File fs/open~_var_run_mwan4track_wan_ipv4_TRACK_1_1_1_1.txt --
+up
+-- End --
+
+-- File fs/open~_var_run_mwan4track_wan_ipv4_LATENCY_1_1_1_1.txt --
+42
+-- End --
+
+-- File fs/open~_var_run_mwan4track_wan_ipv4_LOSS_1_1_1_1.txt --
+0
+-- End --
+
+-- File fs/open~_var_run_mwan4track_wan_ipv4_TRACK_9_9_9_9.txt --
+down
+-- End --
+
+-- File fs/open~_var_run_mwan4track_wan_ipv4_LATENCY_9_9_9_9.txt --
+1200
+-- End --
+
+-- File fs/open~_var_run_mwan4track_wan_ipv4_LOSS_9_9_9_9.txt --
+80
+-- End --
+
+-- File fs/popen~ip_-d_link_show_type_vrf_2_dev_null.txt --
+10: vrf-blue: <NOARP,MASTER,UP> mtu 65536 qdisc noqueue state UP mode DEFAULT group default qlen 1000
+    vrf table 100
+-- End --
+
+-- File fs/popen~ip_-4_rule_show.txt --
+0: from all lookup local
+1000: from all lookup [l3mdev-table] l3mdev
+-- End --
+
+-- File fs/popen~ip_-4_route_show_table_100.txt --
+default dev wan proto static
+-- End --
+
+-- File fs/popen~nft_list_counters_inet_fw4_2_dev_null.txt --
+table inet fw4 {
+	counter mwan4_counter_iface_wan_ipv4 { packets 4 bytes 400 }
+	counter mwan4_counter_strategy_balanced_ipv4_wan { packets 7 bytes 700 }
+	counter mwan4_counter_rule_default_rule_v4_ipv4 { packets 9 bytes 900 }
+	counter mwan4_counter_custom { packets 1 bytes 100 }
+}
+-- End --
+
+-- File fs/popen~nft_list_table_inet_fw4_2_dev_null.txt --
+table inet fw4 {
+	chain mwan4_rules_ipv4 {
+		counter name "mwan4_counter_rule_default_rule_v4_ipv4" jump mwan4_strategy_balanced_ipv4
+		counter name mwan4_counter_missing comment "missing fixture"
+	}
+	chain mwan4_strategy_balanced_ipv4 {
+		counter name mwan4_counter_strategy_balanced_ipv4_wan meta mark set 0x100
+	}
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.load();
+
+let mptcp = m.get_diagnostics({ section: 'mptcp' }).diagnostics.mptcp;
+print('mptcp enabled: ' + mptcp.enabled_bool + '\n');
+print('mptcp endpoints: ' + length(mptcp.endpoint_details) + '\n');
+print('mptcp first flag: ' + mptcp.endpoint_details[0].flags[0] + '\n');
+print('mptcp second flags: ' + join(',', mptcp.endpoint_details[1].flags) + '\n');
+print('mptcp subflows: ' + mptcp.limits_detail.subflows + '\n');
+-- End --
+
+-- Expect stdout --
+mptcp enabled: true
+mptcp endpoints: 2
+mptcp first flag: subflow
+mptcp second flags: signal,backup
+mptcp subflows: 2
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.load();
+
+let quality = m.get_diagnostics({ section: 'quality', interface: 'wan' }).diagnostics.quality;
+let probes = m.get_diagnostics({ section: 'probes', interface: 'wan' }).diagnostics.probes;
+
+print('quality enabled: ' + quality.interfaces.wan.enabled + '\n');
+print('quality supported: ' + quality.interfaces.wan.supported + '\n');
+print('quality failure latency: ' + quality.interfaces.wan.failure_latency + '\n');
+print('probe targets: ' + probes.interfaces.wan.summary.targets + '\n');
+print('probe up: ' + probes.interfaces.wan.summary.up + '\n');
+print('probe down: ' + probes.interfaces.wan.summary.down + '\n');
+print('probe measured: ' + probes.interfaces.wan.summary.measured + '\n');
+print('probe method: ' + probes.interfaces.wan.track_method + '\n');
+print('probe helper available: ' + probes.interfaces.wan.helper_available + '\n');
+print('dns helper available: ' + probes.helpers.nslookup.available + '\n');
+print('bfd sessions: ' + probes.bfd.session_count + '\n');
+print('bfd peer: ' + probes.bfd.sessions[0].peer + '\n');
+print('first latency: ' + probes.interfaces.wan.families.ipv4.targets[0].latency + '\n');
+print('second loss: ' + probes.interfaces.wan.families.ipv4.targets[1].packetloss + '\n');
+-- End --
+
+-- Expect stdout --
+quality enabled: true
+quality supported: true
+quality failure latency: 1000
+probe targets: 2
+probe up: 1
+probe down: 1
+probe measured: 2
+probe method: ping
+probe helper available: true
+dns helper available: true
+bfd sessions: 1
+bfd peer: 192.0.2.1
+first latency: 42
+second loss: 80
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.load();
+
+let vrf = m.get_diagnostics({ section: 'vrf' }).diagnostics.vrf;
+let counters = m.get_diagnostics({ section: 'counters' }).diagnostics.counters;
+
+print('vrf device: ' + vrf.devices[0].name + '\n');
+print('vrf table: ' + vrf.devices[0].table + '\n');
+print('vrf l3mdev: ' + vrf.l3mdev_rule + '\n');
+print('vrf l3mdev rules: ' + length(vrf.l3mdev_rules.ipv4) + '\n');
+print('vrf table route: ' + vrf.tables['vrf-blue'].ipv4[0] + '\n');
+print('counter iface packets: ' + counters.groups.interfaces.wan.summary.packets + '\n');
+print('counter strategy packets: ' + counters.groups.strategies.balanced.summary.packets + '\n');
+print('counter rule bytes: ' + counters.groups.rules.default_rule_v4.summary.bytes + '\n');
+print('counter other total: ' + counters.groups.other.summary.total + '\n');
+print('counter references: ' + counters.summary.referenced + '\n');
+print('counter missing references: ' + counters.summary.missing_references + '\n');
+-- End --
+
+-- Expect stdout --
+vrf device: vrf-blue
+vrf table: 100
+vrf l3mdev: true
+vrf l3mdev rules: 1
+vrf table route: default dev wan proto static
+counter iface packets: 4
+counter strategy packets: 7
+counter rule bytes: 900
+counter other total: 1
+counter references: 3
+counter missing references: 1
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+m.set_iface_hotplug_state('wan', 'online');
+
+let tunnels = m.get_diagnostics({ section: 'tunnels' }).diagnostics.tunnels;
+let explain = m.get_diagnostics({ section: 'explain', family: 'ipv4', dest_ip: '8.8.8.8' }).diagnostics.explain;
+
+print('tunnel endpoint: ' + tunnels.endpoints.interfaces.wg0.endpoint + '\n');
+print('tunnel recursion warning: ' + tunnels.recursion.warnings[0].code + '\n');
+print('matched rule: ' + explain.matched_rule.rule + '\n');
+print('decision status: ' + explain.decision.status + '\n');
+print('decision interface: ' + explain.decision.selected.interface + '\n');
+print('decision mark: ' + explain.decision.selected.mark + '\n');
+print('decision selection: ' + explain.decision.selection + '\n');
+-- End --
+
+-- Expect stdout --
+tunnel endpoint: 192.0.2.10
+tunnel recursion warning: tunnelUnderlaySelfReference
+matched rule: default_rule_v4
+decision status: active
+decision interface: wan
+decision mark: 0x100
+decision selection: single
+-- End --

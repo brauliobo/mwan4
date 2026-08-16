@@ -1,23 +1,37 @@
 #!/usr/bin/env bash
 
 line='........................................'
+have_ucode=0
+ucode=""
 
-# Create a patched copy of mwan4.uc that converts ES module imports to require()
-# calls, so the mock framework can intercept them through the module cache.
-# The original uses: import { readfile, ... } from 'fs'; import { cursor } from 'uci';
-# We convert to: let _fs = require('fs'), readfile = _fs.readfile, ...;
-patch_dir="/tmp/mwan4_test_modules.$$"
-mkdir -p "$patch_dir"
+if command -v ucode >/dev/null 2>&1; then
+	have_ucode=1
 
-sed \
-	-e "s|import { readfile, writefile, popen, stat, unlink } from 'fs';|let _fs = require('fs'), readfile = _fs.readfile, writefile = _fs.writefile, popen = _fs.popen, stat = _fs.stat, unlink = _fs.unlink;|" \
-	-e "s|import { cursor } from 'uci';|let _uci = require('uci'), cursor = _uci.cursor;|" \
-	./files/lib/mwan4/mwan4.uc > "$patch_dir/mwan4.uc"
+	# Create a patched copy of mwan4.uc that converts ES module imports to require()
+	# calls, so the mock framework can intercept them through the module cache.
+	# The original uses: import { readfile, ... } from 'fs'; import { cursor } from 'uci';
+	# We convert to: let _fs = require('fs'), readfile = _fs.readfile, ...;
+	patch_dir="/tmp/mwan4_test_modules.$$"
+	mkdir -p "$patch_dir"
 
-trap "rm -rf '$patch_dir'" EXIT
+	sed \
+		-e "s|import { readfile, writefile, popen, stat, unlink } from 'fs';|let _fs = require('fs'), readfile = _fs.readfile, writefile = _fs.writefile, popen = _fs.popen, stat = _fs.stat, unlink = _fs.unlink;|" \
+		-e "s|import { cursor } from 'uci';|let _uci = require('uci'), cursor = _uci.cursor;|" \
+		./files/lib/mwan4/mwan4.uc > "$patch_dir/mwan4.uc"
 
-# Search paths: patched mwan4.uc first, then tests/lib (for mocklib), then original source
-ucode="ucode -S -L$patch_dir -L./tests/lib -L./files/lib/mwan4"
+	sed \
+		-e "s|import { popen } from 'fs';|let _fs = require('fs'), popen = _fs.popen;|" \
+		./files/lib/mwan4/packages.uc > "$patch_dir/packages.uc"
+
+	sed \
+		-e "s|import m from '/lib/mwan4/mwan4.uc';|import m from 'mwan4';|" \
+		./files/usr/share/rpcd/ucode/mwan4 > "$patch_dir/rpcd_mwan4.uc"
+
+	trap "rm -rf '$patch_dir'" EXIT
+
+	# Search paths: patched mwan4.uc first, then tests/lib (for mocklib), then original source
+	ucode="ucode -S -L$patch_dir -L./tests/lib -L./files/lib/mwan4"
+fi
 
 extract_sections() {
 	local file=$1
@@ -203,18 +217,22 @@ use_test() {
 	return 1
 }
 
-for catdir in tests/[0-9][0-9]_*; do
-	[ -d "$catdir" ] || continue
+if [ "$have_ucode" = 1 ]; then
+	for catdir in tests/[0-9][0-9]_*; do
+		[ -d "$catdir" ] || continue
 
-	printf "\n##\n## Running %s tests\n##\n\n" "${catdir##*/[0-9][0-9]_}"
+		printf "\n##\n## Running %s tests\n##\n\n" "${catdir##*/[0-9][0-9]_}"
 
-	for testfile in "$catdir/"[0-9][0-9]_*; do
-		use_test "$testfile" || continue
+		for testfile in "$catdir/"[0-9][0-9]_*; do
+			use_test "$testfile" || continue
 
-		n_tests=$((n_tests + 1))
-		run_test "$testfile" || n_fails=$((n_fails + 1))
+			n_tests=$((n_tests + 1))
+			run_test "$testfile" || n_fails=$((n_fails + 1))
+		done
 	done
-done
+else
+	printf "\n##\n## Skipping ucode tests (ucode not found)\n##\n\n"
+fi
 
 # ── Shell script syntax checks ──────────────────────────────────────
 

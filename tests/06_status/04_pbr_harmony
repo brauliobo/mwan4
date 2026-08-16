@@ -1,0 +1,129 @@
+Testing PBR harmony diagnostics for IPv6 supported interfaces and mark/table ownership.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x3F00"
+		}
+	],
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"id": "1",
+			"table_id": "1",
+			"mark": "0x100",
+			"family": ["ipv4"]
+		},
+		{
+			".name": "wan6",
+			"enabled": "1",
+			"id": "2",
+			"table_id": "2",
+			"mark": "0x200",
+			"family": ["ipv6"]
+		},
+		{
+			".name": "wanb6",
+			"enabled": "1",
+			"id": "3",
+			"table_id": "3",
+			"mark": "0x300",
+			"family": ["ipv6"]
+		}
+	],
+	"route": [],
+	"strategy": [],
+	"rule": []
+}
+-- End --
+
+-- File uci/pbr.json --
+{
+	"config": [
+		{
+			".name": "config",
+			"enabled": "1",
+			"ipv6_enabled": "1",
+			"fw_mask": "0x00ff0000",
+			"uplink_interface": "wan",
+			"uplink_interface6": "wan6",
+			"supported_interface": ["wan", "wan6"]
+		}
+	]
+}
+-- End --
+
+-- File fs/popen~ip_-4_rule_show.txt --
+0: from all lookup local
+1001: from all iif eth0 lookup 1
+2001: from all fwmark 0x100/0x3f00 lookup 1
+3001: from all fwmark 0x100/0x3f00 unreachable
+30000: from all fwmark 0x10000/0xff0000 lookup pbr_wan
+30001: from all fwmark 0x700/0x3f00 lookup 9
+30002: from all fwmark 0x900/0x3F00 lookup 3
+-- End --
+
+-- File fs/popen~ip_-6_rule_show.txt --
+0: from all lookup local
+1002: from all iif eth1 lookup 2
+2002: from all fwmark 0x200/0x3F00 lookup 2
+3002: from all fwmark 0x200/0x3F00 unreachable
+-- End --
+
+-- File ubus/service~list~name-pbr.json --
+{
+	"pbr": {
+		"instances": {
+			"pbr": {
+				"running": true
+			}
+		}
+	}
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.load();
+
+let pbr = m.get_diagnostics({ section: 'pbr' }).diagnostics.pbr;
+let missing_supported = 0;
+let missing_iface = '';
+let mark_overlap = 0;
+let table_overlap = 0;
+let table_overlap_table = 0;
+let owned_rule_warned = false;
+
+for (let warning in pbr.warnings) {
+	if (warning.code == 'pbrSupportedInterfaceMissing') {
+		missing_supported++;
+		missing_iface = warning.interface;
+	}
+	if (warning.code == 'markMaskOverlap')
+		mark_overlap++;
+	if (warning.code == 'tableOverlap') {
+		table_overlap++;
+		table_overlap_table = warning.table;
+	}
+	if (warning.rule && (index(warning.rule, '0x100/0x3f00 lookup 1') >= 0 || index(warning.rule, '0x200/0x3F00 lookup 2') >= 0))
+		owned_rule_warned = true;
+}
+
+print('warning count: ' + length(pbr.warnings) + '\n');
+print('missing supported: ' + missing_supported + ' ' + missing_iface + '\n');
+print('mark overlaps: ' + mark_overlap + '\n');
+print('table overlaps: ' + table_overlap + ' ' + table_overlap_table + '\n');
+print('owned rule warned: ' + owned_rule_warned + '\n');
+-- End --
+
+-- Expect stdout --
+warning count: 4
+missing supported: 1 wanb6
+mark overlaps: 2
+table overlaps: 1 3
+owned rule warned: false
+-- End --

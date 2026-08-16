@@ -1,0 +1,106 @@
+Testing malicious UCI values are filtered from generated nft output.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x3F00",
+			"loglevel": "notice;touch /tmp/pwn"
+		}
+	],
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"track_ip": ["1.1.1.1", "8.8.8.8;touch /tmp/pwn"],
+			"family": ["ipv4; nft flush ruleset", "ipv4"],
+			"reliability": "1"
+		}
+	],
+	"route": [
+		{
+			".name": "wan_route",
+			"interface": "wan",
+			"metric": "1",
+			"weight": "1"
+		}
+	],
+	"strategy": [
+		{
+			".name": "good_strategy",
+			"use_route": ["wan_route"]
+		}
+	],
+	"rule": [
+		{
+			".name": "bad_proto",
+			"proto": "tcp; counter accept",
+			"dest_port": "443",
+			"use_strategy": "good_strategy"
+		},
+		{
+			".name": "bad_port",
+			"proto": "tcp",
+			"dest_port": "443 } counter accept",
+			"use_strategy": "good_strategy"
+		},
+		{
+			".name": "bad_ipset",
+			"ipset": "bad;flush",
+			"use_strategy": "good_strategy"
+		},
+		{
+			".name": "bad_strategy",
+			"dest_ip": "0.0.0.0/0",
+			"use_strategy": "good_strategy;flush"
+		},
+		{
+			".name": "good_rule",
+			"proto": "tcp",
+			"dest_port": "80,443-445",
+			"use_strategy": "good_strategy",
+			"family": ["ipv4"]
+		}
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.init();
+m.update_iface_to_table();
+
+m.nft_file('create', 'dynamic');
+m.rebuild_iface_nftfile();
+m.nft_file('install', 'dynamic');
+let dynamic_out = global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft') || '';
+
+m.nft_file('create', 'rules');
+m.set_user_rules();
+m.nft_file('install', 'rules');
+let rules_out = global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/11-mwan4-rules.nft') || '';
+let out = dynamic_out + rules_out;
+
+print('has_good_iface: ' + (index(dynamic_out, 'mwan4_iface_in_wan_ipv4') >= 0) + '\n');
+print('has_bad_family: ' + (index(out, 'ipv4; nft flush ruleset') >= 0) + '\n');
+print('has_good_rule: ' + (index(rules_out, 'comment "good_rule"') >= 0) + '\n');
+print('has_bad_proto: ' + (index(out, 'tcp; counter accept') >= 0) + '\n');
+print('has_bad_port: ' + (index(out, '443 } counter accept') >= 0) + '\n');
+print('has_bad_ipset: ' + (index(out, 'bad;flush') >= 0) + '\n');
+print('has_bad_strategy: ' + (index(out, 'good_strategy;flush') >= 0) + '\n');
+print('has_loglevel_injection: ' + (index(out, 'notice;touch') >= 0) + '\n');
+-- End --
+
+-- Expect stdout --
+has_good_iface: true
+has_bad_family: false
+has_good_rule: true
+has_bad_proto: false
+has_bad_port: false
+has_bad_ipset: false
+has_bad_strategy: false
+has_loglevel_injection: false
+-- End --

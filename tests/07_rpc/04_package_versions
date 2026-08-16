@@ -1,0 +1,43 @@
+Testing package version parsing reports installed versions instead of package descriptions.
+
+-- File fs/popen~apk_list_--installed_pbr_2_dev_null.txt --
+pbr-1.2.3-r72 noarch {feeds/packages/feeds/packages/stangri/pbr} (AGPL-3.0-or-later) [installed]
+-- End --
+
+-- File fs/popen~apk_list_--installed_luci-app-pbr_2_dev_null.txt --
+luci-app-pbr-1.2.3-r72 noarch {feeds/luci/applications/luci-app-pbr} (AGPL-3.0-or-later) [installed]
+-- End --
+
+-- File fs/popen~command_-v_apk_2_dev_null.txt --
+/usr/bin/apk
+-- End --
+
+-- File fs/popen~opkg_list-installed_pbr_2_dev_null.txt --
+pbr - 1.2.3-r72
+-- End --
+
+-- File fs/popen~opkg_list-installed_luci-app-pbr_2_dev_null.txt --
+luci-app-pbr - 1.2.3-r72
+-- End --
+
+-- Testcase --
+import package_ctl from 'packages';
+
+print('apk version: ' + package_ctl.package_version('apk', 'pbr') + '\n');
+print('apk luci version: ' + package_ctl.package_version('apk', 'luci-app-pbr') + '\n');
+print('opkg version: ' + package_ctl.package_version('opkg', 'pbr') + '\n');
+print('opkg luci version: ' + package_ctl.package_version('opkg', 'luci-app-pbr') + '\n');
+
+let diagnostics = package_ctl.diagnostics_packages();
+print('diagnostics manager: ' + diagnostics.manager + '\n');
+print('diagnostics luci version: ' + diagnostics.features.pbr.packages[1].version + '\n');
+-- End --
+
+-- Expect stdout --
+apk version: 1.2.3-r72
+apk luci version: 1.2.3-r72
+opkg version: 1.2.3-r72
+opkg luci version: 1.2.3-r72
+diagnostics manager: apk
+diagnostics luci version: 1.2.3-r72
+-- End --

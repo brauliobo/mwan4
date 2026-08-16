@@ -1,0 +1,54 @@
+Testing validation errors for bad backend references.
+
+-- File uci/mwan4.json --
+{
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"family": ["ipv4"]
+		}
+	],
+	"route": [
+		{
+			".name": "bad_route",
+			"interface": "missing",
+			"metric": "1",
+			"weight": "1"
+		}
+	],
+	"strategy": [
+		{
+			".name": "bad_strategy",
+			"use_route": ["bad_route", "missing_route"]
+		}
+	],
+	"rule": [
+		{
+			".name": "bad_rule",
+			"use_strategy": "missing_strategy"
+		}
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.load();
+
+let validation = m.validate_config();
+print('valid: ' + validation.valid + '\n');
+print('errors: ' + length(validation.errors) + '\n');
+for (let error in validation.errors)
+	print(error.code + ': ' + error.section + '\n');
+-- End --
+
+-- Expect stdout --
+valid: false
+errors: 3
+invalidRouteInterface: bad_route
+invalidStrategyRoute: bad_strategy
+invalidRuleStrategy: bad_rule
+-- End --

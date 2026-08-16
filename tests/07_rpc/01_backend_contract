@@ -1,0 +1,127 @@
+Testing rpcd backend contract and constrained control helpers.
+
+-- File fs/popen~command_-v_apk_2_dev_null.txt --
+/usr/bin/apk
+-- End --
+
+-- File fs/popen~command_-v_vtysh_2_dev_null.txt --
+/usr/bin/vtysh
+-- End --
+
+-- Testcase --
+let rpcd = require('rpcd_mwan4');
+let methods = rpcd.mwan4;
+
+for (let method in ['status', 'capabilities', 'validate', 'diagnostics', 'control', 'advanced_control'])
+	print(method + ': ' + (exists(methods, method) ? 'yes' : 'no') + '\n');
+
+let caps = methods.capabilities.call({ args: {} });
+print('cap version: ' + caps.version + '\n');
+print('cap status sections: ' + join(',', caps.status.sections) + '\n');
+print('cap diagnostic sections: ' + join(',', caps.diagnostics.sections) + '\n');
+print('cap probe methods: ' + join(',', caps.probes.track_methods) + '\n');
+print('cap control actions: ' + join(',', caps.control.actions) + '\n');
+print('cap advanced actions: ' + join(',', caps.advanced_control.actions) + '\n');
+print('cap package pbr: ' + join(',', caps.packages.features.pbr) + '\n');
+
+let rpc_advanced_restart = methods.advanced_control.call({ args: { action: 'restart' } });
+print('rpc advanced restart ok: ' + rpc_advanced_restart.ok + '\n');
+print('rpc advanced restart code: ' + rpc_advanced_restart.errors[0].code + '\n');
+
+let validation = methods.validate.call({ args: {} });
+print('validate valid: ' + validation.valid + '\n');
+print('validate errors: ' + length(validation.errors) + '\n');
+print('validate interface count: ' + validation.counts.interfaces + '\n');
+print('validate route count: ' + validation.counts.routes + '\n');
+
+let diagnostics = methods.diagnostics.call({ args: { section: 'summary' } });
+let summary = diagnostics.diagnostics.summary;
+print('diag mask: ' + summary.mmx_mask + '\n');
+print('diag interfaces: ' + join(',', summary.interfaces) + '\n');
+print('diag enabled: ' + join(',', summary.enabled_interfaces) + '\n');
+print('diag next steps: ' + length(summary.status.next_steps) + '\n');
+print('diag first step: ' + summary.status.next_steps[0].id + '\n');
+-- End --
+
+-- Expect stdout --
+status: yes
+capabilities: yes
+validate: yes
+diagnostics: yes
+control: yes
+advanced_control: yes
+cap version: 2
+cap status sections: interfaces,connected,strategies,diagnostics,counters,tunnels
+cap diagnostic sections: all,summary,interfaces,routes,rules,strategies,nftables,service,tunnels,counters,ownership,pbr,mptcp,quality,probes,vrf,explain,packages
+cap probe methods: ping,httping,nslookup,arping,nping-tcp,nping-udp,nping-icmp,nping-arp
+cap control actions: ifup,ifdown,start,stop,restart,reload,reset_counters
+cap advanced actions: install_feature,wireguard_keygen,apply_tunnel_exemptions,apply_bfd
+cap package pbr: pbr,luci-app-pbr
+rpc advanced restart ok: false
+rpc advanced restart code: invalidAction
+validate valid: true
+validate errors: 0
+validate interface count: 4
+validate route count: 10
+diag mask: 0x3f00
+diag interfaces: wan,wan6,wanb,wanb6
+diag enabled: wan
+diag next steps: 1
+diag first step: checkNftables
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.init();
+
+let calls = [];
+global.system = function(command) {
+	push(calls, command);
+	return 0;
+};
+
+let bad_action = m.control({ action: 'shell', command: 'reboot' });
+print('bad action ok: ' + bad_action.ok + '\n');
+print('bad action code: ' + bad_action.errors[0].code + '\n');
+
+let missing_iface = m.control({ action: 'ifdown', interface: 'not_there' });
+print('missing iface ok: ' + missing_iface.ok + '\n');
+print('missing iface code: ' + missing_iface.errors[0].code + '\n');
+
+let ifdown = m.control({ action: 'ifdown', interface: 'wan' });
+print('ifdown ok: ' + ifdown.ok + '\n');
+
+let reset = m.control({ action: 'reset_counters' });
+print('reset counters ok: ' + reset.ok + '\n');
+let runtime_install = m.control({ action: 'install_feature', feature: 'pbr' });
+print('runtime install ok: ' + runtime_install.ok + '\n');
+print('runtime install code: ' + runtime_install.errors[0].code + '\n');
+let advanced_restart = m.advanced_control({ action: 'restart' });
+print('advanced restart ok: ' + advanced_restart.ok + '\n');
+print('advanced restart code: ' + advanced_restart.errors[0].code + '\n');
+let install = m.advanced_control({ action: 'install_feature', feature: 'pbr' });
+print('install feature ok: ' + install.ok + '\n');
+print('install feature packages: ' + join(',', install.packages) + '\n');
+let bfd = m.advanced_control({ action: 'apply_bfd' });
+print('bfd apply ok: ' + bfd.ok + '\n');
+print('calls: ' + join('|', calls) + '\n');
+-- End --
+
+-- Expect stdout --
+bad action ok: false
+bad action code: invalidAction
+missing iface ok: false
+missing iface code: invalidInterface
+ifdown ok: true
+reset counters ok: true
+runtime install ok: false
+runtime install code: invalidAction
+advanced restart ok: false
+advanced restart code: invalidAction
+install feature ok: true
+install feature packages: pbr,luci-app-pbr
+bfd apply ok: true
+calls: env -i ACTION=ifdown INTERFACE='wan' sh /etc/hotplug.d/iface/15-mwan4|nft reset counters inet fw4 >/dev/null 2>&1|apk --allow-untrusted update >/dev/null 2>&1|apk --allow-untrusted add --upgrade 'pbr' 'luci-app-pbr' >/dev/null 2>&1|/etc/init.d/frr reload >/dev/null 2>&1
+-- End --

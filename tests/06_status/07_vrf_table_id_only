@@ -1,0 +1,59 @@
+Testing VRF diagnostics do not fail ordinary table_id-only mwan4 config.
+
+-- File uci/mwan4.json --
+{
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"family": ["ipv4"],
+			"table_id": "1",
+			"mark": "0x100"
+		}
+	],
+	"route": [
+		{
+			".name": "wan_route",
+			"interface": "wan",
+			"metric": "1",
+			"weight": "1"
+		}
+	],
+	"strategy": [
+		{
+			".name": "failover",
+			"use_route": ["wan_route"]
+		}
+	]
+}
+-- End --
+
+-- File ubus/network.interface.wan~status.json --
+{
+	"up": true,
+	"device": "eth1",
+	"l3_device": "eth1"
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.load();
+
+let result = m.get_diagnostics({ section: 'vrf' });
+let validation = result.diagnostics.vrf.validation || [];
+let failed = 0;
+for (let row in validation)
+	if (row.ok === false)
+		failed++;
+
+print('failed: ' + failed + '\n');
+print('rows: ' + length(validation) + '\n');
+-- End --
+
+-- Expect stdout --
+failed: 0
+rows: 2
+-- End --

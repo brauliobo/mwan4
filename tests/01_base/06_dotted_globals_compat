@@ -1,0 +1,35 @@
+Testing legacy dotted globals remain accepted when canonical plain options are absent.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mwan4.mmx_mask": "0x0F00",
+			"mwan4.source_routing": "1"
+		}
+	],
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"family": ["ipv4"]
+		}
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.load();
+print('mmx_mask: ' + m.mmx_mask + '\n');
+print('source_routing: ' + m.source_routing + '\n');
+print('wan mark: ' + m.get_iface_mark('wan') + '\n');
+-- End --
+
+-- Expect stdout --
+mmx_mask: 0x0f00
+source_routing: true
+wan mark: 0x100
+-- End --

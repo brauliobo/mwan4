@@ -13,11 +13,19 @@ m.init();
 
 m.update_iface_to_table();
 m.set_general_rules();
+m.persist_policy_ownership();
 
 // ifup all enabled interfaces (creates IP rules and sets hotplug state)
 m.uci_foreach('interface', function(s) {
 	m.ifup(s['.name'], 'init');
 });
+
+// Seed hotplug state from tracker first-connect status before strategies render.
+m.init_iface_hotplug_states();
+
+// Apply mwan4-owned MPTCP sysctl, limits, and endpoint definitions after WAN
+// source addresses/devices are known.
+m.apply_mptcp_config();
 
 // Generate dynamic file (base structure + interfaces + strategies)
 m.rebuild_dynamic();

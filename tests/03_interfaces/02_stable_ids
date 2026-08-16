@@ -1,0 +1,108 @@
+Testing explicit interface id, routing table id, and mark options.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x3F00"
+		}
+	],
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"family": ["ipv4"],
+			"id": "9",
+			"table_id": "109",
+			"mark": "0x900"
+		}
+	],
+	"route": [
+		{
+			".name": "wan_m1_w1",
+			"interface": "wan",
+			"metric": "1",
+			"weight": "1"
+		}
+	],
+	"strategy": [
+		{
+			".name": "wan_only",
+			"use_route": ["wan_m1_w1"]
+		}
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+print('wan id: ' + m.get_iface_id('wan') + '\n');
+print('wan table: ' + m.get_iface_table_id('wan') + '\n');
+print('wan mark: ' + m.get_iface_mark('wan') + '\n');
+
+global.TRACE_CALLS = 'stdout';
+m.create_iface_rules('wan', 'eth0');
+global.TRACE_CALLS = null;
+
+m.nft_file('create', 'dynamic');
+m.rebuild_iface_nftfile();
+m.set_iface_hotplug_state('wan', 'online');
+m.set_strategies_nftables();
+m.nft_file('install', 'dynamic');
+print(global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft'));
+-- End --
+
+-- Expect stdout --
+wan id: 9
+wan table: 109
+wan mark: 0x900
+[call] system command <ip -4 rule add pref 1009 iif 'eth0' lookup 109 >/dev/null 2>&1> timeout <null>
+[call] system command <ip -4 rule add pref 2009 fwmark 0x900/0x3f00 lookup 109 >/dev/null 2>&1> timeout <null>
+[call] system command <ip -4 rule add pref 3009 fwmark 0x900/0x3f00 unreachable >/dev/null 2>&1> timeout <null>
+table inet fw4 {
+
+	counter mwan4_counter_iface_wan_ipv4_custom_default {
+	}
+
+	counter mwan4_counter_iface_wan_ipv4_connected_default {
+	}
+
+	counter mwan4_counter_iface_wan_ipv4_dynamic_default {
+	}
+
+	counter mwan4_counter_iface_wan_ipv4 {
+	}
+
+	chain mwan4_iface_in_wan_ipv4 {
+		iifname "eth0" ip saddr @mwan4_custom_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_custom_default meta mark set 0x3f00 comment "default"
+		iifname "eth0" ip saddr @mwan4_connected_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_connected_default meta mark set 0x3f00 comment "default"
+		iifname "eth0" ip saddr @mwan4_dynamic_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_dynamic_default meta mark set 0x3f00 comment "default"
+		iifname "eth0" meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4 meta mark set 0x900 comment "wan"
+	}
+
+	chain mwan4_ifaces_in {
+		meta mark & 0x3f00 == 0 meta nfproto ipv4 jump mwan4_iface_in_wan_ipv4
+	}
+}
+table inet fw4 {
+
+	counter mwan4_counter_strategy_wan_only_ipv4_wan {
+	}
+
+	counter mwan4_counter_strategy_wan_only_ipv4_unreachable {
+	}
+
+	counter mwan4_counter_strategy_wan_only_ipv6_unreachable {
+	}
+	chain mwan4_strategy_wan_only_ipv4 {
+		meta mark & 0x3f00 == 0 counter name mwan4_counter_strategy_wan_only_ipv4_wan meta mark set 0x900 comment "wan 1 1"
+		meta mark & 0x3f00 == 0 counter name mwan4_counter_strategy_wan_only_ipv4_unreachable meta mark set 0x3e00 comment "unreachable"
+	}
+	chain mwan4_strategy_wan_only_ipv6 {
+		meta mark & 0x3f00 == 0 counter name mwan4_counter_strategy_wan_only_ipv6_unreachable meta mark set 0x3e00 comment "unreachable"
+	}
+}
+-- End --

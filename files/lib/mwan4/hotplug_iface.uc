@@ -14,17 +14,18 @@ let INTERFACE = getenv('INTERFACE');
 let DEVICE = getenv('DEVICE');
 let MWAN4_STARTUP = getenv('MWAN4_STARTUP');
 
-// Check if mwan4 has been set up (dynamic nft file exists)
-if (!m.nft_file('exists', 'dynamic')) {
-	m.LOG('warn', 'hotplug called on', INTERFACE, 'before mwan4 has been set up');
-	exit(0);
-}
-
 // Check interface enabled
 let enabled = m.uci_bool(m.uci_get(INTERFACE, 'enabled'));
 if (!enabled) {
 	m.LOG('notice', 'mwan4 hotplug on', INTERFACE, 'not called because interface disabled');
 	exit(0);
+}
+
+function setup_ready() {
+	if (m.nft_file('exists', 'dynamic'))
+		return true;
+	m.LOG('warn', 'hotplug called on', INTERFACE, 'before mwan4 has been set up');
+	return false;
 }
 
 // Determine initial status
@@ -63,15 +64,17 @@ function signal_trackers(signame) {
 switch (ACTION) {
 case 'connected':
 	m.set_iface_hotplug_state(INTERFACE, 'online');
+	if (!setup_ready()) exit(0);
 	m.rebuild_dynamic();
 	m.nft_file('install', 'dynamic');
 	m.fw4_reload();
 	break;
 
 case 'ifup':
+	m.set_iface_hotplug_state(INTERFACE, hp_status);
+	if (!setup_ready()) exit(0);
 	m.create_iface_rules(INTERFACE, DEVICE);
 	m.create_iface_route(INTERFACE);
-	m.set_iface_hotplug_state(INTERFACE, hp_status);
 	if (MWAN4_STARTUP != 'init') {
 		m.set_general_rules();
 		m.rebuild_dynamic();
@@ -83,6 +86,7 @@ case 'ifup':
 
 case 'disconnected':
 	m.set_iface_hotplug_state(INTERFACE, 'offline');
+	if (!setup_ready()) exit(0);
 	m.rebuild_dynamic();
 	m.nft_file('install', 'dynamic');
 	m.fw4_reload();
@@ -90,6 +94,7 @@ case 'disconnected':
 
 case 'ifdown':
 	m.set_iface_hotplug_state(INTERFACE, 'offline');
+	if (!setup_ready()) exit(0);
 	m.delete_iface_rules(INTERFACE);
 	m.delete_iface_route(INTERFACE);
 	signal_trackers('USR1');

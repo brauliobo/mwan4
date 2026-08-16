@@ -1,0 +1,96 @@
+Testing tunnel metadata parsing and status/diagnostic exposure.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x3F00"
+		}
+	],
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"family": ["ipv4"]
+		},
+		{
+			".name": "tun0",
+			"enabled": "1",
+			"family": ["ipv4"],
+			"type": "tunnel",
+			"transport_type": "wireguard",
+			"underlay_strategy": "wan_only",
+			"endpoint_fail_mode": "hold",
+			"data_fail_mode": "fail_closed",
+			"prevent_recursion": "1"
+		}
+	],
+	"route": [
+		{
+			".name": "wan_route",
+			"interface": "wan",
+			"metric": "1",
+			"weight": "1"
+		}
+	],
+	"strategy": [
+		{
+			".name": "wan_only",
+			"use_route": ["wan_route"]
+		}
+	],
+	"rule": []
+}
+-- End --
+
+-- File ubus/network.interface.tun0~status.json --
+{
+	"up": true,
+	"l3_device": "tun0",
+	"device": "tun0",
+	"ipv4-address": [
+		{
+			"address": "10.8.0.2",
+			"mask": 24
+		}
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.load();
+
+let meta = m.get_tunnel_metadata('tun0');
+print('type: ' + meta.type + '\n');
+print('transport_type: ' + meta.transport_type + '\n');
+print('underlay_strategy: ' + meta.underlay_strategy + '\n');
+print('endpoint_fail_mode: ' + meta.endpoint_fail_mode + '\n');
+print('data_fail_mode: ' + meta.data_fail_mode + '\n');
+print('prevent_recursion: ' + meta.prevent_recursion + '\n');
+
+let status = m.get_tunnel_status();
+let tun0 = status.interfaces.tun0;
+print('tunnel interfaces: ' + join(',', keys(status.interfaces)) + '\n');
+print('underlay interfaces: ' + join(',', tun0.underlay_interfaces) + '\n');
+print('warnings: ' + length(status.warnings) + '\n');
+
+let diagnostics = m.get_diagnostics({ section: 'tunnels' });
+print('diagnostic type: ' + diagnostics.diagnostics.tunnels.interfaces.tun0.type + '\n');
+-- End --
+
+-- Expect stdout --
+type: tunnel
+transport_type: wireguard
+underlay_strategy: wan_only
+endpoint_fail_mode: hold
+data_fail_mode: fail_closed
+prevent_recursion: true
+tunnel interfaces: tun0
+underlay interfaces: wan
+warnings: 0
+diagnostic type: tunnel
+-- End --

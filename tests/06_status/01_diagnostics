@@ -1,0 +1,74 @@
+Testing status diagnostics warn when mwan4 is configured but inactive.
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.load();
+
+let diagnostics = m.get_status_diagnostics({
+	service_instances: {},
+	nft_chains:        {
+		prerouting: false,
+		output:     false,
+		rules_ipv4: false,
+		rules_ipv6: false,
+	},
+});
+
+print('configured: ' + diagnostics.configured + '\n');
+print('service_running: ' + diagnostics.service_running + '\n');
+print('trackers_expected: ' + diagnostics.trackers_expected + '\n');
+print('trackers_running: ' + diagnostics.trackers_running + '\n');
+print('nft_chains: ' + diagnostics.nft_chains + '\n');
+
+for (let warning in diagnostics.warnings)
+	print(warning.code + ': ' + warning.message + ' | ' + warning.action + ' | ' + warning.check + '\n');
+
+for (let step in diagnostics.next_steps)
+	print('next ' + step.id + ': ' + step.title + ' | ' + step.command + '\n');
+-- End --
+
+-- Expect stdout --
+configured: true
+service_running: false
+trackers_expected: 1
+trackers_running: 0
+nft_chains: false
+serviceInactive: mwan4 is configured, but no service instances are running. | Start or restart mwan4 from LuCI, or run `/etc/init.d/mwan4 restart`, then re-check `mwan4 status`. | Verify service instances with `ubus call service list '{"name":"mwan4"}'`.
+trackersInactive: mwan4 has enabled tracking targets, but no health trackers are running. | Restart mwan4, then verify tracker instances named `track_<iface>_<family>` are running. | Check enabled interfaces with `track_ip` and status files under `/var/run/mwan4track`.
+nftInactive: mwan4 is configured, but nftables chains are missing. | Restart mwan4 or reload firewall, then re-check generated nftables chains. | Run `nft list table inet fw4` and inspect `/usr/share/nftables.d/ruleset-post/10-mwan4.nft`.
+next restartService: Restart mwan4 service | /etc/init.d/mwan4 restart
+next checkTrackers: Check health trackers | ubus call service list '{"name":"mwan4"}'
+next checkNftables: Check nftables chains | nft list table inet fw4
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.load();
+
+let diagnostics = m.get_status_diagnostics({
+	service_instances: {
+		mwan4:          { running: true },
+		track_wan_ipv4: { running: true },
+	},
+	nft_chains:        {
+		prerouting: true,
+		output:     false,
+		rules_ipv4: true,
+		rules_ipv6: false,
+	},
+});
+
+print('partial nft_chains: ' + diagnostics.nft_chains + '\n');
+print('partial warnings: ' + length(diagnostics.warnings) + '\n');
+print('partial warning: ' + diagnostics.warnings[0].code + '\n');
+print('partial next: ' + diagnostics.next_steps[0].id + '\n');
+-- End --
+
+-- Expect stdout --
+partial nft_chains: false
+partial warnings: 1
+partial warning: nftInactive
+partial next: checkNftables
+-- End --

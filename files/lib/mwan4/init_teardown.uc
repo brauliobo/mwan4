@@ -10,38 +10,29 @@ import m from 'mwan4';
 m.set_scriptname('mwan4-init');
 m.init();
 
+// Remove only endpoints previously created by mwan4. This avoids flushing
+// externally managed MPTCP endpoints.
+m.remove_mptcp_managed_endpoints();
+
 // Shutdown all interfaces
 m.uci_foreach('interface', function(s) {
 	m.interface_shutdown(s['.name']);
 });
 
-// Flush routing tables and delete IP rules per family
+let ownership = m.get_installed_policy_ownership();
+if (!length(ownership.tables) && !length(ownership.rule_prefs))
+	ownership = m.get_policy_ownership();
+
+// Flush routing tables and delete only mwan4-owned IP rules per family.
 for (let family in ['ipv4', 'ipv6']) {
 	if (family == 'ipv6' && m.no_ipv6) continue;
 	let ip = (family == 'ipv4') ? 'ip -4' : 'ip -6';
 
-	// Flush routing tables
-	let table_lines = m.cmd_lines(ip + ' route list table all');
-	let seen = {};
-	for (let line in table_lines) {
-		let tm = match(line, /table ([0-9]+)/);
-		if (!tm) continue;
-		let tid = int(tm[1]);
-		if (tid > m.iface_max || seen[tid]) continue;
-		seen[tid] = true;
+	for (let tid in ownership.tables)
 		system(sprintf('%s route flush table %d 2>/dev/null', ip, tid));
-	}
 
-	// Delete mwan4 IP rules (interface rules at id+1000/2000/3000, general rules)
-	let rule_lines = m.cmd_lines(ip + ' rule list');
-	for (let line in rule_lines) {
-		let rm = match(line, /^([0-9]+):/);
-		if (!rm) continue;
-		let pref = int(rm[1]);
-		let id = pref % 1000;
-		if (pref > 1000 && pref < 4000 && id >= 1 && id <= m.iface_max + 2)
-			system(sprintf('%s rule del pref %d 2>/dev/null', ip, pref));
-	}
+	for (let pref in ownership.rule_prefs)
+		system(sprintf('%s rule del pref %d 2>/dev/null', ip, pref));
 }
 
 // Remove nftables include and temp files (fw4 reload is triggered by service_stopped)

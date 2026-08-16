@@ -1,0 +1,140 @@
+Testing status counters in generated nft and parsed nft output.
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+m.update_iface_to_table();
+m.set_iface_hotplug_state('wan', 'online');
+
+m.nft_file('create', 'dynamic');
+m.rebuild_iface_nftfile();
+m.set_strategies_nftables();
+m.nft_file('install', 'dynamic');
+let dynamic = global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft');
+
+m.nft_file('create', 'rules');
+m.set_user_rules();
+m.nft_file('install', 'rules');
+let rules = global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/11-mwan4-rules.nft');
+
+print('interface counter def: ' + (index(dynamic, 'counter mwan4_counter_iface_wan_ipv4 {') >= 0) + '\n');
+print('interface counter stmt: ' + (index(dynamic, 'counter name mwan4_counter_iface_wan_ipv4 meta mark set 0x100') >= 0) + '\n');
+print('strategy counter def: ' + (index(dynamic, 'counter mwan4_counter_strategy_wan_only_ipv4_wan {') >= 0) + '\n');
+print('strategy counter stmt: ' + (index(dynamic, 'counter name mwan4_counter_strategy_wan_only_ipv4_wan meta mark set 0x100') >= 0) + '\n');
+print('rule counter def: ' + (index(rules, 'counter mwan4_counter_rule_default_rule_v4_ipv4 {') >= 0) + '\n');
+print('rule counter stmt: ' + (index(rules, 'counter name mwan4_counter_rule_default_rule_v4_ipv4 jump mwan4_strategy_balanced_ipv4') >= 0) + '\n');
+-- End --
+
+-- Expect stdout --
+interface counter def: true
+interface counter stmt: true
+strategy counter def: true
+strategy counter stmt: true
+rule counter def: true
+rule counter stmt: true
+-- End --
+
+-- File fs/popen~nft_list_counters_inet_fw4_2_dev_null.txt --
+table inet fw4 {
+	counter mwan4_counter_rule_default_rule_v4_ipv4 {
+		packets 12 bytes 3456
+	}
+	counter mwan4_counter_strategy_wan_only_ipv4_wan { packets 3 bytes 192 }
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+
+let counters = m.report_counters();
+
+print('default packets: ' + counters.mwan4_counter_rule_default_rule_v4_ipv4.packets + '\n');
+print('default bytes: ' + counters.mwan4_counter_rule_default_rule_v4_ipv4.bytes + '\n');
+print('strategy packets: ' + counters.mwan4_counter_strategy_wan_only_ipv4_wan.packets + '\n');
+print('strategy bytes: ' + counters.mwan4_counter_strategy_wan_only_ipv4_wan.bytes + '\n');
+-- End --
+
+-- Expect stdout --
+default packets: 12
+default bytes: 3456
+strategy packets: 3
+strategy bytes: 192
+-- End --
+
+-- Testcase --
+let rpcd = require('rpcd_mwan4');
+
+let direct = rpcd.mwan4.counters.call({ args: {} });
+let section = rpcd.mwan4.status.call({ args: { section: 'counters' } });
+let diagnostics = rpcd.mwan4.diagnostics.call({ args: { section: 'counters' } });
+let summary = diagnostics.diagnostics.counters.summary;
+
+print('rpc method bytes: ' + direct.counters.mwan4_counter_rule_default_rule_v4_ipv4.bytes + '\n');
+print('rpc status bytes: ' + section.counters.mwan4_counter_strategy_wan_only_ipv4_wan.bytes + '\n');
+print('diag counter total: ' + summary.total + '\n');
+print('diag counter packets: ' + summary.packets + '\n');
+print('diag rule counters: ' + summary.rules + '\n');
+print('diag strategy counters: ' + summary.strategies + '\n');
+-- End --
+
+-- Expect stdout --
+rpc method bytes: 3456
+rpc status bytes: 192
+diag counter total: 2
+diag counter packets: 15
+diag rule counters: 1
+diag strategy counters: 1
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.init();
+
+let calls = [];
+global.system = function(command) {
+	push(calls, command);
+	return 0;
+};
+
+let reset = m.control({ action: 'reset_counters' });
+
+print('reset ok: ' + reset.ok + '\n');
+print('reset action: ' + reset.action + '\n');
+print('reset command: ' + calls[0] + '\n');
+-- End --
+
+-- Expect stdout --
+reset ok: true
+reset action: reset_counters
+reset command: nft reset counters inet fw4 >/dev/null 2>&1
+-- End --
+
+-- File fs/popen~nft_list_chain_inet_fw4_mwan4_strategy_wan_only_ipv4_2_dev_null.txt --
+table inet fw4 {
+	chain mwan4_strategy_wan_only_ipv4 {
+		meta mark & 0x00003f00 == 0x00000000 counter name "mwan4_counter_strategy_wan_only_ipv4_wan" meta mark set 0x00000100 comment "wan 3 3"
+		meta mark & 0x00003f00 == 0x00000000 counter name "mwan4_counter_strategy_wan_only_ipv4_unreachable" meta mark set 0x00003e00 comment "unreachable"
+	}
+}
+-- End --
+
+-- Testcase --
+let rpcd = require('rpcd_mwan4');
+
+let strategies = rpcd.mwan4.status.call({ args: { section: 'strategies' } }).strategies;
+
+print('ipv4 wan_only interface: ' + strategies.ipv4.wan_only[0].interface + '\n');
+print('ipv4 wan_only percent: ' + strategies.ipv4.wan_only[0].percent + '\n');
+print('ipv6 empty: ' + (length(keys(strategies.ipv6)) == 0) + '\n');
+-- End --
+
+-- Expect stdout --
+ipv4 wan_only interface: wan
+ipv4 wan_only percent: 100
+ipv6 empty: true
+-- End --

@@ -1,0 +1,123 @@
+Testing MPTCP endpoint-management configuration and safe apply behavior.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x3F00",
+			"source_routing": "1"
+		}
+	],
+	"mptcp": [
+		{
+			".name": "mptcp",
+			"enabled": "1",
+			"add_addr_accepted": "8",
+			"subflows": "2"
+		}
+	],
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"id": "1",
+			"table_id": "1",
+			"mark": "0x100",
+			"family": ["ipv4"]
+		}
+	],
+	"mptcp_endpoint": [
+		{
+			".name": "wan_signal",
+			"enabled": "1",
+			"interface": "wan",
+			"family": "ipv4",
+			"id": "10",
+			"flag": ["signal", "subflow"]
+		}
+	]
+}
+-- End --
+
+-- File ubus/network.interface.wan~status.json --
+{
+	"up": true,
+	"l3_device": "eth0",
+	"device": "eth0",
+	"ipv4-address": [
+		{
+			"address": "10.64.10.2",
+			"mask": 24
+		}
+	]
+}
+-- End --
+
+-- File ubus/network.interface.wan_4~status.json --
+{
+	"up": true,
+	"l3_device": "eth0",
+	"device": "eth0",
+	"ipv4-address": [
+		{
+			"address": "10.64.10.2",
+			"mask": 24
+		}
+	]
+}
+-- End --
+
+-- File fs/open~_proc_sys_net_mptcp_enabled.txt --
+1
+-- End --
+
+-- File fs/popen~ip_mptcp_limits_show_2_dev_null.txt --
+add_addr_accepted 8 subflows 2
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+let mocklib = global.mocklib;
+let calls = [];
+
+global.system = function(command) {
+	push(calls, command);
+	return 0;
+};
+
+m.set_scriptname('test');
+m.load();
+
+let diagnostics = m.get_diagnostics({ section: 'mptcp' }).diagnostics.mptcp;
+print('configured: ' + diagnostics.configured + '\n');
+print('config endpoints: ' + length(diagnostics.config.endpoints) + '\n');
+print('config endpoint address: ' + diagnostics.config.endpoints[0].address + '\n');
+print('config endpoint device: ' + diagnostics.config.endpoints[0].device + '\n');
+print('config endpoint flags: ' + join(',', diagnostics.config.endpoints[0].flags) + '\n');
+
+let applied = m.apply_mptcp_config();
+print('apply ok: ' + applied.ok + '\n');
+print('apply sysctl: ' + applied.sysctl + '\n');
+print('apply limits: ' + applied.limits + '\n');
+print('apply endpoints: ' + length(applied.endpoints) + '\n');
+print('sysctl captured: ' + mocklib.read_captured('/proc/sys/net/mptcp/enabled'));
+print('managed state: ' + mocklib.read_captured('/var/run/mwan4/mptcp.endpoints'));
+print('calls: ' + join('|', calls) + '\n');
+-- End --
+
+-- Expect stdout --
+configured: true
+config endpoints: 1
+config endpoint address: 10.64.10.2
+config endpoint device: eth0
+config endpoint flags: signal,subflow
+apply ok: true
+apply sysctl: true
+apply limits: true
+apply endpoints: 1
+sysctl captured: 1
+managed state: 10	wan_signal	10.64.10.2	eth0
+calls: ip -6 addr show >/dev/null 2>&1|ip mptcp limits set add_addr_accepted 8 subflows 2 >/dev/null 2>&1|ip mptcp endpoint add '10.64.10.2' dev 'eth0' id '10' signal subflow >/dev/null 2>&1
+-- End --

@@ -1,0 +1,82 @@
+Testing route explain IPv6 CIDR matching.
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x3F00"
+		}
+	],
+	"interface": [
+		{
+			".name": "wan6",
+			"enabled": "1",
+			"id": "2",
+			"table_id": "2",
+			"mark": "0x200",
+			"family": ["ipv6"]
+		}
+	],
+	"route": [
+		{
+			".name": "wan6_route",
+			"interface": "wan6",
+			"metric": "1",
+			"weight": "1"
+		}
+	],
+	"strategy": [
+		{
+			".name": "v6_only",
+			"use_route": ["wan6_route"]
+		}
+	],
+	"rule": [
+		{
+			".name": "docs_v6",
+			"dest_ip": "2001:0db8:abcd::/48",
+			"use_strategy": "v6_only",
+			"family": ["ipv6"]
+		},
+		{
+			".name": "default_rule_v6",
+			"dest_ip": "::/0",
+			"use_strategy": "default",
+			"family": ["ipv6"]
+		}
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+m.set_iface_hotplug_state('wan6', 'online');
+
+let inside = m.get_diagnostics({ section: 'explain', dest_ip: '2001:db8:abcd:12::99' }).diagnostics.explain;
+let outside = m.get_diagnostics({ section: 'explain', family: 'ipv6', dest_ip: '2001:db8:abce::1' }).diagnostics.explain;
+
+print('inside family: ' + inside.input.family + '\n');
+print('inside matched rule: ' + inside.matched_rule.rule + '\n');
+print('inside cidr matched: ' + inside.rules[0].checks.dest_ip.matched + '\n');
+print('inside strategy: ' + inside.decision.strategy + '\n');
+print('inside interface: ' + inside.decision.selected.interface + '\n');
+print('inside mark: ' + inside.decision.selected.mark + '\n');
+print('outside matched rule: ' + outside.matched_rule.rule + '\n');
+print('outside cidr matched: ' + outside.rules[0].checks.dest_ip.matched + '\n');
+print('outside default matched: ' + outside.rules[1].checks.dest_ip.matched + '\n');
+-- End --
+
+-- Expect stdout --
+inside family: ipv6
+inside matched rule: docs_v6
+inside cidr matched: true
+inside strategy: v6_only
+inside interface: wan6
+inside mark: 0x200
+outside matched rule: default_rule_v6
+outside cidr matched: false
+outside default matched: true
+-- End --

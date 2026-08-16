@@ -1,0 +1,128 @@
+Testing validation catches schema-level config problems.
+
+-- File uci/mwan4.json --
+{
+	"interface": [
+		{
+			".name": "wan",
+			"enabled": "1",
+			"family": ["ipv4"],
+			"id": "1",
+			"table_id": "1",
+			"mark": "0x100",
+			"bfd_peer": "not-an-ip",
+			"bfd_min_rx": "0"
+		},
+		{
+			".name": "wan_dup",
+			"enabled": "1",
+			"family": ["ipv9"],
+			"id": "1",
+			"table_id": "1",
+			"mark": "0x100",
+			"bfd_multiplier": "999"
+		},
+		{
+			".name": "tun0",
+			"enabled": "1",
+			"family": ["ipv4"],
+			"type": "tunnel",
+			"transport_type": "unknown",
+			"endpoint_host": "bad host!",
+			"endpoint_port": "70000",
+			"local_endpoint": "not-ip",
+			"underlay_strategy": "missing_strategy",
+			"endpoint_fail_mode": "explode",
+			"data_fail_mode": "panic"
+		}
+	],
+	"route": [
+		{
+			".name": "bad_route",
+			"interface": "wan",
+			"metric": "999",
+			"weight": "0"
+		}
+	],
+	"strategy": [
+		{
+			".name": "bad_strategy",
+			"use_route": ["bad_route"],
+			"last_resort": "punt"
+		}
+	],
+	"rule": [
+		{
+			".name": "bad_rule",
+			"family": ["ipv4"],
+			"proto": "all",
+			"src_ip": "999.999.999.999",
+			"dest_port": "443",
+			"ipset": "bad-name?",
+			"use_strategy": "bad_strategy"
+		}
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.load();
+
+function has_code(validation, code) {
+	for (let error in validation.errors)
+		if (error.code == code)
+			return 'yes';
+	return 'no';
+}
+
+let validation = m.validate_config();
+print('valid: ' + validation.valid + '\n');
+for (let code in [
+	'duplicateInterfaceId',
+	'duplicateTableId',
+	'duplicateMark',
+	'invalidBfdPeer',
+	'invalidBfdMinRx',
+	'invalidBfdMultiplier',
+	'invalidRouteMetric',
+	'invalidRouteWeight',
+	'invalidStrategyLastResort',
+	'invalidRulePortProtocol',
+	'invalidRuleSourceAddress',
+	'invalidRuleIpset',
+	'invalidTunnelTransport',
+	'invalidTunnelUnderlayStrategy',
+	'invalidTunnelEndpoint',
+	'invalidTunnelEndpointPort',
+	'invalidTunnelLocalEndpoint',
+	'invalidTunnelEndpointFailMode',
+	'invalidTunnelDataFailMode'
+])
+	print(code + ': ' + has_code(validation, code) + '\n');
+-- End --
+
+-- Expect stdout --
+valid: false
+duplicateInterfaceId: yes
+duplicateTableId: yes
+duplicateMark: yes
+invalidBfdPeer: yes
+invalidBfdMinRx: yes
+invalidBfdMultiplier: yes
+invalidRouteMetric: yes
+invalidRouteWeight: yes
+invalidStrategyLastResort: yes
+invalidRulePortProtocol: yes
+invalidRuleSourceAddress: yes
+invalidRuleIpset: yes
+invalidTunnelTransport: yes
+invalidTunnelUnderlayStrategy: yes
+invalidTunnelEndpoint: yes
+invalidTunnelEndpointPort: yes
+invalidTunnelLocalEndpoint: yes
+invalidTunnelEndpointFailMode: yes
+invalidTunnelDataFailMode: yes
+-- End --

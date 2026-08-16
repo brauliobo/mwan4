@@ -27,8 +27,14 @@ function getpid() {
 
 // ── Arguments ────────────────────────────────────────────────────────
 
+m.set_scriptname('mwan4track');
+
 let INTERFACE = ARGV[0];
 let FAMILY = ARGV[1] || 'ipv4';
+if (!m.validate_section_name(INTERFACE) || !m.validate_family(FAMILY)) {
+	m.LOG('err', 'Invalid mwan4track arguments');
+	exit(1);
+}
 let status_iface = INTERFACE + '_' + FAMILY;
 let status_dir = m.pkg.TRACK_STATUS_DIR + '/' + status_iface;
 
@@ -70,28 +76,69 @@ function ws(file, value) {
 }
 
 function hotplug(action, extra) {
+	if (!m.validate_device_name(DEVICE)) return;
 	let cmd = sprintf('env -i ACTION=%s INTERFACE=%s DEVICE=%s',
-		action, INTERFACE, DEVICE);
+		m.shell_quote(action), m.shell_quote(INTERFACE), m.shell_quote(DEVICE));
 	if (extra) cmd += ' ' + extra;
 	cmd += ' /sbin/hotplug-call iface';
 	system(cmd);
 }
 
 function wrap(cmd) {
+	if (!m.validate_device_name(DEVICE)) return 1;
 	return system(sprintf(
 		'FAMILY=%s DEVICE=%s SRCIP=%s FWMARK=%s LD_PRELOAD=/lib/mwan4/libwrap_mwan4_sockopt.so.1.0 %s',
-		FAMILY, DEVICE, SRC_IP, m.mmx_default, cmd));
+		m.shell_quote(FAMILY), m.shell_quote(DEVICE), m.shell_quote(SRC_IP), m.shell_quote(m.mmx_default), cmd));
 }
 
 function wrap_output(cmd) {
+	if (!m.validate_device_name(DEVICE)) return { rc: 1, out: '' };
 	let full = sprintf(
 		'FAMILY=%s DEVICE=%s SRCIP=%s FWMARK=%s LD_PRELOAD=/lib/mwan4/libwrap_mwan4_sockopt.so.1.0 %s',
-		FAMILY, DEVICE, SRC_IP, m.mmx_default, cmd);
+		m.shell_quote(FAMILY), m.shell_quote(DEVICE), m.shell_quote(SRC_IP), m.shell_quote(m.mmx_default), cmd);
 	let p = popen(full + ' 2>/dev/null', 'r');
 	if (!p) return { rc: 1, out: '' };
 	let out = p.read('all') || '';
 	let rc = p.close();
 	return { rc, out };
+}
+
+function parse_ping_result(result) {
+	let loss = null;
+	let latency = null;
+	let lm = match(result.out || '', /(\d+)% packet loss/);
+
+	if (lm)
+		loss = int(lm[1]);
+
+	if (result.rc != 0 || loss == 100) {
+		latency = 999999;
+		loss = 100;
+	} else {
+		let lat = match(result.out || '', /(rtt|round-trip).* = [^\/]*\/(\d+)/);
+		latency = lat ? int(lat[2]) : null;
+	}
+
+	return { latency, loss };
+}
+
+function parse_httping_result(result) {
+	let loss = null;
+	let latency = null;
+	let lm = match(result.out || '', /(\d+).*% failed/);
+
+	if (lm)
+		loss = int(lm[1]);
+
+	if (result.rc != 0 || loss == 100) {
+		latency = 999999;
+		loss = 100;
+	} else {
+		let lat = match(result.out || '', /(rtt|round-trip).* = [^\/]*\/(\d+)/);
+		latency = lat ? int(lat[2]) : null;
+	}
+
+	return { latency, loss };
 }
 
 // ── State Transitions ────────────────────────────────────────────────
@@ -163,7 +210,7 @@ function disabled() {
 
 function update_track(ip, st, lat, loss_v) { // ucode-lsp disable
 	writefile(status_dir + '/TRACK_' + ip, st + '\n');
-	if (lat != null) {
+	if (lat != null && loss_v != null) {
 		writefile(status_dir + '/LATENCY_' + ip, lat + '\n');
 		writefile(status_dir + '/LOSS_' + ip, loss_v + '\n');
 	}
@@ -196,6 +243,10 @@ function has_cmd(name) {
 }
 
 function validate_track_method(method) {
+	if (!m.validate_track_method_name(method)) {
+		m.LOG('warn', 'Unsupported tracking method:', method);
+		return false;
+	}
 	switch (method) {
 	case 'ping':
 		PING = get_ping_command();
@@ -218,7 +269,6 @@ function validate_track_method(method) {
 			if (!has_cmd('nping')) { m.LOG('warn', 'Missing nping. Please install nping package.'); return false; }
 			return true;
 		}
-		m.LOG('warn', 'Unsupported tracking method:', method);
 		return false;
 	}
 }
@@ -229,6 +279,11 @@ function firstconnect() {
 	let true_iface = m.get_true_iface(INTERFACE, FAMILY);
 	let st = m.ubus_call('network.interface.' + true_iface, 'status');
 	DEVICE = st?.l3_device || st?.device || '';
+	if (DEVICE && !m.validate_device_name(DEVICE)) {
+		m.LOG('warn', 'Invalid device name for interface', INTERFACE + ':', DEVICE);
+		disabled();
+		return;
+	}
 
 	if (STATUS != 'online')
 		STATUS = m.uci_get(INTERFACE, 'initial_state') || 'online';
@@ -252,61 +307,46 @@ function firstconnect() {
 // ── Run Probe ───────────────────────────────────────────────────────
 
 function run_probe(track_ip) { // ucode-lsp disable
-	let result = 1, latency = 0, probe_loss = 0;
+	let result = 1, latency = null, probe_loss = null;
+	if (!m.validate_track_target(track_ip)) return { result, latency, loss: probe_loss };
+	let target = m.shell_quote(track_ip);
 
 	switch (track_method) {
-	case 'ping':
-		if (!check_quality) {
-			result = wrap(sprintf('%s -n -c %d -W %d -s %d -t %d -q %s >/dev/null 2>&1',
-				PING, count, timeout_val, pkt_size, max_ttl, track_ip));
-		} else {
-			let r = wrap_output(sprintf('%s -n -c %d -W %d -s %d -t %d -q %s',
-				PING, count, timeout_val, pkt_size, max_ttl, track_ip));
-			let lm = match(r.out, /(\d+)% packet loss/);
-			probe_loss = lm ? int(lm[1]) : 100;
-			if (r.rc != 0 || probe_loss == 100) {
-				latency = 999999; probe_loss = 100;
-			} else {
-				let lat = match(r.out, /(rtt|round-trip).* = [^\/]*\/(\d+)/);
-				latency = lat ? int(lat[2]) : 999999;
-			}
-		}
+	case 'ping': {
+		let r = wrap_output(sprintf('%s -n -c %d -W %d -s %d -t %d -q %s',
+			PING, count, timeout_val, pkt_size, max_ttl, target));
+		let metrics = parse_ping_result(r);
+		result = r.rc;
+		latency = metrics.latency;
+		probe_loss = metrics.loss;
 		break;
+	}
 
 	case 'arping':
 		result = wrap(sprintf('arping -I %s -c %d -w %d -q %s >/dev/null 2>&1',
-			DEVICE, count, timeout_val, track_ip));
+			m.shell_quote(DEVICE), count, timeout_val, target));
 		break;
 
 	case 'httping': {
 		let scheme = httping_ssl ? 'https' : 'http';
-		if (!check_quality) {
-			result = wrap(sprintf('httping -c %d -t %d -q "%s://%s" >/dev/null 2>&1',
-				count, timeout_val, scheme, track_ip));
-		} else {
-			let r = wrap_output(sprintf('httping -c %d -t %d "%s://%s"',
-				count, timeout_val, scheme, track_ip));
-			let lm = match(r.out, /(\d+).*% failed/);
-			probe_loss = lm ? int(lm[1]) : 100;
-			if (r.rc != 0 || probe_loss == 100) {
-				latency = 999999; probe_loss = 100;
-			} else {
-				let lat = match(r.out, /(rtt|round-trip).* = [^\/]*\/(\d+)/);
-				latency = lat ? int(lat[2]) : 999999;
-			}
-		}
+		let url = m.shell_quote(sprintf('%s://%s', scheme, track_ip));
+		let r = wrap_output(sprintf('httping -c %d -t %d %s', count, timeout_val, url));
+		let metrics = parse_httping_result(r);
+		result = r.rc;
+		latency = metrics.latency;
+		probe_loss = metrics.loss;
 		break;
 	}
 
 	case 'nslookup':
-		result = wrap(sprintf('nslookup www.google.com %s >/dev/null 2>&1', track_ip));
+		result = wrap(sprintf('nslookup www.google.com %s >/dev/null 2>&1', target));
 		break;
 
 	default:
 		if (match(track_method, /^nping-/)) {
 			let proto = substr(track_method, 6);
 			let flag = (FAMILY == 'ipv6') ? '-6' : '-4';
-			let r = wrap_output(sprintf('nping %s -c %d %s --%s', flag, count, track_ip, proto));
+			let r = wrap_output(sprintf('nping %s -c %d %s --%s', flag, count, target, proto));
 			let lm = match(r.out, /Lost.*?(\d+)/);
 			result = lm ? int(lm[1]) : 1;
 		}
@@ -354,11 +394,11 @@ track_cycle = function() {
 		if (!check_quality) {
 			if (p.result == 0) {
 				host_up_count++;
-				update_track(track_ip, 'up');
+				update_track(track_ip, 'up', p.latency, p.loss);
 				if (score <= up) do_log = 'success';
 			} else {
 				lost++;
-				update_track(track_ip, 'down');
+				update_track(track_ip, 'down', p.latency, p.loss);
 				if (score > up) do_log = 'failed';
 			}
 			if (do_log)
@@ -436,7 +476,6 @@ function clean_up() {
 
 // ── Main ────────────────────────────────────────────────────────────
 
-m.set_scriptname('mwan4track');
 m.init();
 
 // Set up status directory
@@ -445,7 +484,7 @@ writefile(status_dir + '/PID', '' + getpid() + '\n');
 stopped();
 
 // Load config
-track_method = m.uci_get(INTERFACE, 'track_method') || 'ping';
+track_method = lc(m.uci_get(INTERFACE, 'track_method') || 'ping');
 httping_ssl = m.uci_bool(m.uci_get(INTERFACE, 'httping_ssl'));
 if (!validate_track_method(track_method)) {
 	track_method = 'ping';
@@ -474,7 +513,19 @@ recovery_latency  = int(m.uci_get(INTERFACE, 'recovery_latency'))  || 500;
 failure_loss      = int(m.uci_get(INTERFACE, 'failure_loss'))      || 40;
 recovery_loss     = int(m.uci_get(INTERFACE, 'recovery_loss'))     || 10;
 
-track_ips = m.uci_get_list(INTERFACE, 'track_ip') || [];
+track_ips = [];
+for (let target in m.uci_get_list(INTERFACE, 'track_ip')) {
+	if (m.validate_track_target(target)) {
+		push(track_ips, target);
+	} else {
+		m.LOG('warn', 'Ignoring invalid tracking target for', INTERFACE + ':', target);
+	}
+}
+if (!length(track_ips)) {
+	m.LOG('err', 'No valid tracking targets for', INTERFACE);
+	disabled();
+	exit(1);
+}
 
 score = down + up;
 host_up_count = 0;
