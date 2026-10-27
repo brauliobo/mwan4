@@ -1,0 +1,87 @@
+Testing validation and nft generation for the list, MAC, DSCP, domain and enabled rule options.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "s1", "use_route": ["wan_r"] }
+	],
+	"rule": [
+		{ ".name": "good", "label": "Good", "dest_ip": ["192.0.2.0/24", "2001:db8::/32"], "src_mac": ["aa:bb:cc:dd:ee:ff"], "dscp": "34", "domain": ["example.com"], "use_strategy": "s1" },
+		{ ".name": "bad_mac", "src_mac": ["aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff } counter accept"], "use_strategy": "s1" },
+		{ ".name": "bad_dscp", "dscp": "64", "use_strategy": "s1" },
+		{ ".name": "bad_dscp_nan", "dscp": "ef; flush", "use_strategy": "s1" },
+		{ ".name": "bad_domain", "domain": ["example.com", "evil.com; flush ruleset"], "use_strategy": "s1" },
+		{ ".name": "bad_dest_list", "dest_ip": ["192.0.2.1", "192.0.2.2, counter accept"], "family": ["ipv4"], "use_strategy": "s1" },
+		{ ".name": "wrong_family", "dest_ip": ["2001:db8::1"], "family": ["ipv4"], "use_strategy": "s1" },
+		{ ".name": "bad_src_list", "src_ip": ["10.0.0.1", "10.0.0.999"], "use_strategy": "s1" },
+		{ ".name": "a_rule_name_far_too_long", "dest_port": "22", "proto": "tcp", "use_strategy": "s1" },
+		{ ".name": "disabled_bad", "enabled": "0", "src_mac": ["nonsense"], "use_strategy": "s1" }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+
+print('mac good: ' + m.validate_mac('AA:bb:cc:dd:ee:ff') + '\n');
+print('mac short: ' + m.validate_mac('aa:bb:cc:dd:ee') + '\n');
+print('mac injection: ' + m.validate_mac('aa:bb:cc:dd:ee:ff;touch') + '\n');
+print('dscp 1: ' + m.validate_dscp('1') + '\n');
+print('dscp 63: ' + m.validate_dscp('63') + '\n');
+print('dscp 0: ' + m.validate_dscp('0') + '\n');
+print('dscp 64: ' + m.validate_dscp('64') + '\n');
+print('dscp name: ' + m.validate_dscp('ef') + '\n');
+
+let validation = m.validate_config();
+print('valid: ' + validation.valid + '\n');
+for (let e in validation.errors)
+	print(e.code + ' ' + e.section + '\n');
+
+m.update_iface_to_table();
+m.nft_file('create', 'rules');
+m.set_user_rules();
+m.nft_file('install', 'rules');
+let nft = global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/11-mwan4-rules.nft');
+for (let line in split(nft, '\n'))
+	if (index(line, 'comment') >= 0) print(replace(line, / counter name \S+ jump \S+/, ' ...') + '\n');
+print('injection present: ' + (index(nft, 'counter accept') >= 0 || index(nft, 'flush') >= 0 || index(nft, 'touch') >= 0) + '\n');
+-- End --
+
+-- Expect stdout --
+mac good: true
+mac short: false
+mac injection: false
+dscp 1: true
+dscp 63: true
+dscp 0: false
+dscp 64: false
+dscp name: false
+valid: false
+invalidRuleSourceMac bad_mac
+invalidRuleDscp bad_dscp
+invalidRuleDscp bad_dscp_nan
+invalidRuleDomain bad_domain
+invalidRuleDestinationAddress bad_dest_list
+invalidRuleDestinationAddress wrong_family
+invalidRuleSourceAddress bad_src_list
+ruleNameTooLong a_rule_name_far_too_long
+invalidRuleSourceMac disabled_bad
+		ether saddr aa:bb:cc:dd:ee:ff ip dscp 34 ip daddr 192.0.2.0/24 ip daddr @mwan4_dom_good_ipv4 meta mark & 0x3f00 == 0 ... comment "good"
+		ether saddr aa:bb:cc:dd:ee:ff meta mark & 0x3f00 == 0 ... comment "bad_mac"
+		ip daddr @mwan4_dom_bad_domain_ipv4 meta mark & 0x3f00 == 0 ... comment "bad_domain"
+		ip daddr 192.0.2.1 meta mark & 0x3f00 == 0 ... comment "bad_dest_list"
+		ip saddr 10.0.0.1 meta mark & 0x3f00 == 0 ... comment "bad_src_list"
+		ether saddr aa:bb:cc:dd:ee:ff ip6 dscp 34 ip6 daddr 2001:db8::/32 ip6 daddr @mwan4_dom_good_ipv6 meta mark & 0x3f00 == 0 ... comment "good"
+		ether saddr aa:bb:cc:dd:ee:ff meta mark & 0x3f00 == 0 ... comment "bad_mac"
+		ip6 daddr @mwan4_dom_bad_domain_ipv6 meta mark & 0x3f00 == 0 ... comment "bad_domain"
+injection present: false
+-- End --

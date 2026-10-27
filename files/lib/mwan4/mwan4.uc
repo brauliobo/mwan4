@@ -6,10 +6,12 @@
 import { readfile, writefile, popen, stat, unlink } from 'fs';
 import { cursor } from 'uci';
 import package_ctl from 'packages';
+import dnsmasq from 'dnsmasq';
 
 // Forward declarations — defined later but referenced by the export block.
 // ucode does not hoist function declarations.
 let rebuild_dynamic;
+let prefetch_domains;
 let _ensure_init;
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -55,7 +57,14 @@ const NFT_ID_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const NFT_ID_PART_RE = /^[A-Za-z0-9_]{1,64}$/;
 const DEVICE_RE = /^[A-Za-z0-9_.:@+-]{1,64}$/;
 const ROUTE_TABLE_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,31}$/;
+const MAC_RE = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
 const HOSTNAME_RE = /^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$/;
+
+// Generated catch-all rules: always evaluated last and applied to router-originated traffic.
+const DEFAULT_RULES = {
+	default_rule_v4: true,
+	default_rule_v6: true,
+};
 
 const VALID_PROTOCOLS = {
 	all:          true,
@@ -421,6 +430,8 @@ function fw4_reload() {
 	if (rc != 0) {
 		push(mwan4.errors, { code: 'errorFw4Reload', info: 'fw4 reload exit code ' + rc });
 		LOG('error', 'fw4 reload failed');
+	} else {
+		prefetch_domains();
 	}
 	return rc == 0;
 }
@@ -839,6 +850,43 @@ function rule_address_valid_any(value) {
 	return validate_rule_address(value, 'ipv4') || validate_rule_address(value, 'ipv6');
 }
 
+function validate_mac(value) {
+	return value != null && !!match('' + value, MAC_RE);
+}
+
+function validate_dscp(value) {
+	return validate_uint_range(value, 1, 63);
+}
+
+function rule_enabled(rule) {
+	return rule.enabled == null || uci_bool(rule.enabled);
+}
+
+// IPv6 addresses stored as "/N" by older UI versions lose their leading "::".
+function fix_rule_address(addr, family) {
+	return (family == 'ipv6' && substr(addr, 0, 1) == '/') ? ':' + addr : addr;
+}
+
+// Entries valid for the family; null when the option is set but nothing applies to it.
+function rule_family_values(rule, option, family) {
+	let all = map(as_list(rule[option]), addr => fix_rule_address(trim('' + addr), family));
+	let values = filter(all, addr => validate_rule_address(addr, family));
+	return (length(all) && !length(values)) ? null : values;
+}
+
+// Entries accepted by `valid`; null when the option is set but nothing is usable.
+function rule_valid_values(rule, option, valid, kind) {
+	let all = map(as_list(rule[option]), v => trim('' + v));
+	let values = filter(all, v => valid(v));
+	for (let v in all)
+		if (!valid(v)) warn_invalid(kind, v, sprintf('rule %s', rule['.name']));
+	return (length(all) && !length(values)) ? null : values;
+}
+
+function nft_value_set(values) {
+	return length(values) == 1 ? values[0] : sprintf('{ %s }', join(', ', values));
+}
+
 function endpoint_family(endpoint) {
 	if (!endpoint || index(endpoint, '/') >= 0) return null;
 	if (validate_ipv4_cidr(endpoint)) return 'ipv4';
@@ -929,6 +977,13 @@ function uci_section_map(stype) {
 	return result;
 }
 
+// Config order is the rule priority; the generated catch-alls always go last.
+function ordered_rules() {
+	let rules = [];
+	uci_foreach('rule', s => push(rules, s));
+	return [...filter(rules, s => !DEFAULT_RULES[s['.name']]), ...filter(rules, s => DEFAULT_RULES[s['.name']])];
+}
+
 // ── Lazy Initialization ──────────────────────────────────────────────
 
 _ensure_init = function() {
@@ -964,6 +1019,13 @@ _ensure_init = function() {
 };
 
 function load() {
+	_ensure_init();
+}
+
+// Long-lived consumers (rpcd) must see UCI changes made after they started.
+function reload() {
+	uci_ctx = null;
+	_loaded = false;
 	_ensure_init();
 }
 
@@ -1795,27 +1857,20 @@ function set_general_nftables() {
 	);
 
 	// Per-family rules chains (populated later by set_user_rules)
-	push(L, '',
-		sprintf('\tchain %s_rules_ipv4 {', NFT_PREFIX),
-		'\t}'
-	);
-	if (mwan4.no_ipv6 == 0) {
-		push(L, '',
-			sprintf('\tchain %s_rules_ipv6 {', NFT_PREFIX),
-			'\t}'
-		);
-	}
+	for (let suffix in ['', '_out'])
+		for (let fam in ['ipv4', 'ipv6'])
+			if (fam == 'ipv4' || mwan4.no_ipv6 == 0)
+				push(L, '', sprintf('\tchain %s_rules%s_%s {', NFT_PREFIX, suffix, fam), '\t}');
 
-	// Rules dispatch chain: jump to per-family rules chains
-	let rules_lines = [
-		'',
-		sprintf('\tchain %s_rules {', NFT_PREFIX),
-		sprintf('\t\tmeta nfproto ipv4 jump %s_rules_ipv4', NFT_PREFIX),
-	];
-	if (mwan4.no_ipv6 == 0)
-		push(rules_lines, sprintf('\t\tmeta nfproto ipv6 jump %s_rules_ipv6', NFT_PREFIX));
-	push(rules_lines, '\t}');
-	push(L, ...rules_lines);
+	// Rules dispatch chains: jump to per-family rules chains. Router-originated traffic
+	// only sees the rules flagged `local`.
+	for (let suffix in ['', '_out']) {
+		push(L, '', sprintf('\tchain %s_rules%s {', NFT_PREFIX, suffix),
+			sprintf('\t\tmeta nfproto ipv4 jump %s_rules%s_ipv4', NFT_PREFIX, suffix));
+		if (mwan4.no_ipv6 == 0)
+			push(L, sprintf('\t\tmeta nfproto ipv6 jump %s_rules%s_ipv6', NFT_PREFIX, suffix));
+		push(L, '\t}');
+	}
 
 	// RA exemption block (shared between prerouting and output)
 	let ra_exempt = [
@@ -1830,8 +1885,8 @@ function set_general_nftables() {
 
 	// Build prerouting and output chains (same logic, different hook)
 	for (let chain_info in [
-		[sprintf('%s_prerouting', NFT_PREFIX), 'type filter hook prerouting priority mangle; policy accept;'],
-		[sprintf('%s_output', NFT_PREFIX), 'type route hook output priority mangle; policy accept;'],
+		[sprintf('%s_prerouting', NFT_PREFIX), 'type filter hook prerouting priority mangle; policy accept;', 'rules'],
+		[sprintf('%s_output', NFT_PREFIX), 'type route hook output priority mangle; policy accept;', 'rules_out'],
 	]) {
 		push(L, '', sprintf('\tchain %s {', chain_info[0]),
 			sprintf('\t\t%s', chain_info[1])
@@ -1849,7 +1904,7 @@ function set_general_nftables() {
 		if (mwan4.no_ipv6 == 0)
 			push(L, ..._nft_set_check_rules('ipv6', true));
 		// User rules
-		push(L, sprintf('\t\tmeta mark & %s == 0 jump %s_rules', mwan4.mmx_mask, NFT_PREFIX));
+		push(L, sprintf('\t\tmeta mark & %s == 0 jump %s_%s', mwan4.mmx_mask, NFT_PREFIX, chain_info[2]));
 		// Save only mwan4-owned bits. Constant mark rules avoid cross-register
 		// bitwise expressions rejected by older kernels.
 		push(L, ..._nft_conntrack_save_rules());
@@ -2250,7 +2305,68 @@ function _collect_sticky_ifaces(rule_name, family, strategy_name) { // ucode-lsp
 	return sticky_ifaces;
 }
 
+function rule_families(s) {
+	let families = as_list(s.family);
+	if (!length(families)) return mwan4.no_ipv6 == 0 ? ['ipv4', 'ipv6'] : ['ipv4'];
+	return filter_valid_families(families, sprintf('rule %s', s['.name']));
+}
+
+function rule_src_device(s) {
+	if (!s.src_iface) return '';
+	let rule = s['.name'];
+	if (!validate_section_name(s.src_iface)) {
+		warn_invalid('section name', s.src_iface, sprintf('rule %s src_iface', rule));
+		return null;
+	}
+	let device = network_get_device(s.src_iface);
+	if (!device) {
+		LOG('notice', sprintf('could not find device for src_iface %s in rule %s', s.src_iface, rule));
+		return null;
+	}
+	if (!validate_device_name(device)) {
+		warn_invalid('device name', device, sprintf('rule %s src_iface', rule));
+		return null;
+	}
+	return device;
+}
+
+// Ports only exist for tcp/udp; returns null when a port list is invalid.
+function rule_ports(s, proto) {
+	if (proto != 'tcp' && proto != 'udp') return { src: '', dest: '' };
+	let ports = { src: normalize_ports(s.src_port), dest: normalize_ports(s.dest_port) };
+	if (ports.src == null) warn_invalid('source port', s.src_port, sprintf('rule %s', s['.name']));
+	if (ports.dest == null) warn_invalid('destination port', s.dest_port, sprintf('rule %s', s['.name']));
+	return (ports.src == null || ports.dest == null) ? null : ports;
+}
+
+function rule_port_match(proto, ports) {
+	if (ports.src && ports.dest)
+		return [sprintf('%s sport { %s } %s dport { %s }', proto, ports.src, proto, ports.dest)];
+	if (ports.src) return [sprintf('%s sport { %s }', proto, ports.src)];
+	if (ports.dest) return [sprintf('%s dport { %s }', proto, ports.dest)];
+	return [];
+}
+
+function rule_ipset_name(s, family) {
+	if (!s.ipset) return '';
+	return (family == 'ipv4' || length(rule_families(s)) == 1) ? s.ipset : s.ipset + '_ipv6';
+}
+
+function rule_domain_set(rule, family) {
+	return sprintf('%s_dom_%s_%s', NFT_PREFIX, rule, family);
+}
+
+function rule_mark_action(use_strategy, family) {
+	switch (use_strategy) {
+		case 'default':     return { action: sprintf('meta mark set %s', mwan4.mmx_default) };
+		case 'unreachable': return { action: sprintf('meta mark set %s', mwan4.mmx_unreachable) };
+		case 'blackhole':   return { action: sprintf('meta mark set %s', mwan4.mmx_blackhole) };
+	}
+	return { action: sprintf('jump %s_strategy_%s_%s', NFT_PREFIX, use_strategy, family), jump: true };
+}
+
 function _build_user_rule(s, family_flag) { // ucode-lsp disable
+	if (!rule_enabled(s)) return null;
 	if (family_flag == 'ipv6' && mwan4.no_ipv6 != 0) return null;
 
 	let rule = s['.name'];
@@ -2267,14 +2383,7 @@ function _build_user_rule(s, family_flag) { // ucode-lsp disable
 	let sticky = int(s.sticky || '0');
 	let timeout = int(s.timeout || '600');
 	let proto = normalize_protocol(s.proto || 'all');
-	let src_ip = s.src_ip || '';
-	let src_iface = s.src_iface || '';
-	let src_port = s.src_port || '';
-	let dest_ip = s.dest_ip || '';
-	let dest_port = s.dest_port || '';
 	let use_strategy = s.use_strategy || '';
-	let ipset = s.ipset || '';
-	let rule_logging = int(s.logging || '0');
 	let loglevel = normalize_loglevel(uci_get('globals', 'loglevel') || 'notice') || 'notice';
 
 	if (!proto) {
@@ -2284,72 +2393,28 @@ function _build_user_rule(s, family_flag) { // ucode-lsp disable
 	if (timeout < 1) timeout = 600;
 	if (sticky < 0) sticky = 0;
 
-	// Family filter
-	let family_list = filter_valid_families(as_list(s.family), sprintf('rule %s', rule));
-	if (length(family_list)) {
-		let found = false;
-		for (let f in family_list)
-			if (f == family_flag) { found = true; break; }
-		if (!found) return null;
-	} else if (length(as_list(s.family))) {
+	if (index(rule_families(s), family_flag) < 0) return null;
+
+	let src_ip = rule_family_values(s, 'src_ip', family_flag);
+	let dest_ip = rule_family_values(s, 'dest_ip', family_flag);
+	let src_mac = rule_valid_values(s, 'src_mac', validate_mac, 'source mac');
+	let domains = rule_valid_values(s, 'domain', validate_hostname, 'domain');
+	if (src_ip == null || dest_ip == null || src_mac == null || domains == null) return null;
+
+	if (s.dscp != null && !validate_dscp(s.dscp)) {
+		warn_invalid('dscp', s.dscp, sprintf('rule %s', rule));
 		return null;
 	}
 
-	// Fix malformed IPv6 addresses
-	if (family_flag == 'ipv6') {
-		if (dest_ip && substr(dest_ip, 0, 1) == '/')
-			dest_ip = ':' + dest_ip;
-		if (src_ip && substr(src_ip, 0, 1) == '/')
-			src_ip = ':' + src_ip;
-	}
+	let src_dev = rule_src_device(s);
+	if (src_dev == null) return null;
 
-	// Validate IP addresses don't cross families or inject nft syntax.
-	for (let addr in [src_ip, dest_ip]) {
-		if (!addr) continue;
-		if (!validate_rule_address(addr, family_flag)) {
-			warn_invalid('rule address', addr, sprintf('rule %s', rule));
-			return null;
-		}
-	}
-
-	// Resolve src_iface to device
-	let src_dev = '';
-	if (src_iface) {
-		if (!validate_section_name(src_iface)) {
-			warn_invalid('section name', src_iface, sprintf('rule %s src_iface', rule));
-			return null;
-		}
-		src_dev = network_get_device(src_iface);
-		if (!src_dev) {
-			LOG('notice', sprintf('could not find device for src_iface %s in rule %s', src_iface, rule));
-			return null;
-		}
-		if (!validate_device_name(src_dev)) {
-			warn_invalid('device name', src_dev, sprintf('rule %s src_iface', rule));
-			return null;
-		}
-	}
-
-	// Validate port/proto combination
-	if (proto != 'tcp' && proto != 'udp') {
-		src_port = '';
-		dest_port = '';
-	} else {
-		src_port = normalize_ports(src_port);
-		dest_port = normalize_ports(dest_port);
-		if (src_port == null) {
-			warn_invalid('source port', s.src_port, sprintf('rule %s', rule));
-			return null;
-		}
-		if (dest_port == null) {
-			warn_invalid('destination port', s.dest_port, sprintf('rule %s', rule));
-			return null;
-		}
-	}
+	let ports = rule_ports(s, proto);
+	if (!ports) return null;
 
 	if (!use_strategy) return null;
-	if (ipset && !validate_nft_identifier(ipset)) {
-		warn_invalid('nft identifier', ipset, sprintf('rule %s ipset', rule));
+	if (s.ipset && !validate_nft_identifier(s.ipset)) {
+		warn_invalid('nft identifier', s.ipset, sprintf('rule %s ipset', rule));
 		return null;
 	}
 	if (use_strategy != 'default' && use_strategy != 'unreachable' && use_strategy != 'blackhole' && !validate_nft_section_name(use_strategy)) {
@@ -2358,162 +2423,176 @@ function _build_user_rule(s, family_flag) { // ucode-lsp disable
 	}
 
 	let nftflag = (family_flag == 'ipv4') ? NFT_IPV4 : NFT_IPV6;
+	let domain_set = length(domains) ? rule_domain_set(rule, family_flag) : '';
+	let ipset = rule_ipset_name(s, family_flag);
 
-	// Build match criteria parts
 	let parts = [];
 	if (proto != 'all') push(parts, sprintf('meta l4proto %s', proto));
-	if (src_ip) push(parts, sprintf('%s saddr %s', nftflag, src_ip));
+	if (length(src_ip)) push(parts, sprintf('%s saddr %s', nftflag, nft_value_set(src_ip)));
+	if (length(src_mac)) push(parts, sprintf('ether saddr %s', nft_value_set(src_mac)));
 	if (src_dev) push(parts, sprintf('iifname "%s"', src_dev));
-	if (dest_ip) push(parts, sprintf('%s daddr %s', nftflag, dest_ip));
+	if (s.dscp != null) push(parts, sprintf('%s dscp %d', nftflag, s.dscp));
+	if (length(dest_ip)) push(parts, sprintf('%s daddr %s', nftflag, nft_value_set(dest_ip)));
+	if (domain_set) push(parts, sprintf('%s daddr @%s', nftflag, domain_set));
 	if (ipset) push(parts, sprintf('%s daddr @%s', nftflag, ipset));
-	if (src_port && dest_port)
-		push(parts, sprintf('%s sport { %s } %s dport { %s }', proto, src_port, proto, dest_port));
-	else if (src_port)
-		push(parts, sprintf('%s sport { %s }', proto, src_port));
-	else if (dest_port)
-		push(parts, sprintf('%s dport { %s }', proto, dest_port));
+	push(parts, ...rule_port_match(proto, ports));
 
-	let match_str = join(' ', parts);
-
-	// Determine action
-	let mark_action;
-	let is_strategy_jump = false;
-	switch (use_strategy) {
-		case 'default':     mark_action = sprintf('meta mark set %s', mwan4.mmx_default); break;
-		case 'unreachable': mark_action = sprintf('meta mark set %s', mwan4.mmx_unreachable); break;
-		case 'blackhole':   mark_action = sprintf('meta mark set %s', mwan4.mmx_blackhole); break;
-		default:
-			is_strategy_jump = true;
-			mark_action = sprintf('jump %s_strategy_%s_%s', NFT_PREFIX, use_strategy, family_flag);
-			break;
-	}
+	let mark = rule_mark_action(use_strategy, family_flag);
 
 	return {
-		rule, family_flag, match_str, mark_action,
-		is_strategy_jump, sticky, timeout, use_strategy, ipset,
-		rule_logging,
+		rule, family_flag, match_str: join(' ', parts), mark_action: mark.action,
+		is_strategy_jump: !!mark.jump, sticky, timeout, use_strategy, ipset,
+		domains: map(domains, d => lc(d)), domain_set,
+		local: DEFAULT_RULES[rule] || uci_bool(s.local),
+		rule_logging: int(s.logging || '0'),
 		global_logging: int(uci_get('globals', 'logging') || '0'),
 		loglevel,
 	};
 }
 
-function set_user_rules() {
-	// Collect all rules for both families
+// Built rules per family, in priority order.
+function collect_user_rules() {
 	let rule_data = { ipv4: [], ipv6: [] };
-	let sticky_rules = {};
-	let sticky_set_defs = {};
 
-	uci_foreach('rule', function(s) {
+	for (let s in ordered_rules()) {
 		for (let fam in ['ipv4', 'ipv6']) {
 			let rd = _build_user_rule(s, fam);
 			if (!rd) continue;
 
-			if (rd.is_strategy_jump && rd.sticky) {
-				let sticky_ifaces = _collect_sticky_ifaces(rd.rule, fam, rd.use_strategy);
-				if (length(sticky_ifaces)) {
-					sticky_set_defs[rd.rule] = rd.timeout;
-					sticky_rules[rd.rule + '_' + fam] = rd.use_strategy;
-					rd.has_sticky = true;
-				}
-			}
+			if (rd.is_strategy_jump && rd.sticky)
+				rd.sticky_ifaces = _collect_sticky_ifaces(rd.rule, fam, rd.use_strategy);
+			rd.has_sticky = length(rd.sticky_ifaces) > 0;
 			push(rule_data[fam], rd);
-		}
-	});
-
-	// Build nft file: sticky set defs, sticky chains, then rule chains
-	let L = [sprintf('table inet %s {', NFT_TABLE)];
-
-	// Pre-create nft sets referenced by ipset option (e.g., dnsmasq nftset targets)
-	let seen_sets = {};
-	for (let fam in ['ipv4', 'ipv6']) {
-		for (let rd in rule_data[fam]) {
-			if (!rd.ipset || seen_sets[rd.ipset]) continue;
-			seen_sets[rd.ipset] = true;
-			let set_type = (fam == 'ipv4') ? 'ipv4_addr' : 'ipv6_addr';
-			push(L,
-				sprintf('\tset %s {', rd.ipset),
-				sprintf('\t\ttype %s', set_type),
-				'\t\tflags interval',
-				'\t\tauto-merge',
-				'\t}'
-			);
 		}
 	}
 
-	// Sticky map definitions (maps source address -> mark for session persistence)
-	for (let rule_name in keys(sticky_set_defs)) {
-		let timeout = sticky_set_defs[rule_name];
-		push(L,
-			sprintf('\tmap %s_rule_ipv4_%s {', NFT_PREFIX, rule_name),
-			'\t\ttypeof ip saddr : meta mark',
+	return rule_data;
+}
+
+function set_defs(names, type) {
+	let lines = [];
+	for (let name in names)
+		push(lines, sprintf('\tset %s {', name), sprintf('\t\ttype %s', type), '\t\tflags interval', '\t\tauto-merge', '\t}');
+	return lines;
+}
+
+// Sets referenced by rules: ipset option and dnsmasq-filled domain sets, typed per family.
+function rule_set_defs(rule_data) {
+	let lines = [];
+	for (let fam in ['ipv4', 'ipv6']) {
+		let rules = rule_data[fam];
+		let names = uniq(filter([...map(rules, rd => rd.ipset), ...map(rules, rd => rd.domain_set)], v => v));
+		push(lines, ...set_defs(names, fam == 'ipv4' ? 'ipv4_addr' : 'ipv6_addr'));
+	}
+	return lines;
+}
+
+function sticky_map_defs(rule_name, timeout) {
+	let lines = [];
+	for (let fam in ['ipv4', 'ipv6']) {
+		if (fam == 'ipv6' && mwan4.no_ipv6 != 0) continue;
+		push(lines,
+			sprintf('\tmap %s_rule_%s_%s {', NFT_PREFIX, fam, rule_name),
+			sprintf('\t\ttypeof %s saddr : meta mark', fam == 'ipv4' ? 'ip' : 'ip6'),
 			'\t\tflags timeout',
 			sprintf('\t\ttimeout %ds', timeout),
 			'\t}'
 		);
-		if (mwan4.no_ipv6 == 0) {
-			push(L,
-				sprintf('\tmap %s_rule_ipv6_%s {', NFT_PREFIX, rule_name),
-				'\t\ttypeof ip6 saddr : meta mark',
-				'\t\tflags timeout',
-				sprintf('\t\ttimeout %ds', timeout),
-				'\t}'
-			);
-		}
 	}
+	return lines;
+}
+
+function sticky_chain_lines(rd, fam) {
+	let saddr = (fam == 'ipv4') ? 'ip saddr' : 'ip6 saddr';
+	let map_name = sprintf('%s_rule_%s_%s', NFT_PREFIX, fam, rd.rule);
+	let mask = mwan4.mmx_mask;
+	return [
+		sprintf('\tchain %s_rule_%s_%s {', NFT_PREFIX, rd.rule, fam),
+		// Restore the mark from the previous session, else let the strategy assign one, then refresh the map.
+		sprintf('\t\tmeta mark & %s == 0 meta mark set %s map @%s', mask, saddr, map_name),
+		sprintf('\t\tmeta mark & %s == 0 jump %s_strategy_%s_%s', mask, NFT_PREFIX, rd.use_strategy, fam),
+		sprintf('\t\tmeta mark & %s != 0 meta mark & %s != %s update @%s { %s : meta mark }',
+			mask, mask, mwan4.mmx_default, map_name, saddr),
+		'\t}',
+	];
+}
+
+function rule_chain_lines(chain, rules) {
+	let lines = [sprintf('\tchain %s {', chain)];
+	for (let rd in rules) {
+		let prefix = sprintf('%s meta mark & %s == 0', rd.match_str, mwan4.mmx_mask);
+
+		if (rd.global_logging && rd.rule_logging)
+			push(lines, sprintf('\t\t%s log prefix "MWAN4(%s) " comment "%s"', prefix, rd.rule, rd.rule));
+
+		let action = rd.has_sticky ? sprintf('jump %s_rule_%s_%s', NFT_PREFIX, rd.rule, rd.family_flag) : rd.mark_action;
+		push(lines, sprintf('\t\t%s %s %s comment "%s"', prefix, nft_counter_use(rd.counter), action, rd.rule));
+	}
+	push(lines, '\t}');
+	return lines;
+}
+
+function set_user_rules(rule_data) {
+	rule_data ??= collect_user_rules();
+
+	let L = [sprintf('table inet %s {', NFT_TABLE)];
+	push(L, ...rule_set_defs(rule_data));
+
+	let sticky_timeouts = {};
+	for (let fam in ['ipv4', 'ipv6'])
+		for (let rd in rule_data[fam])
+			if (rd.has_sticky) sticky_timeouts[rd.rule] = rd.timeout;
+	for (let rule_name in keys(sticky_timeouts))
+		push(L, ...sticky_map_defs(rule_name, sticky_timeouts[rule_name]));
 
 	let counter_defs = [];
 	let counter_seen = {};
-	for (let fam in ['ipv4', 'ipv6']) {
+	for (let fam in ['ipv4', 'ipv6'])
 		for (let rd in rule_data[fam])
 			rd.counter = nft_add_counter(counter_defs, counter_seen, 'rule', rd.rule, fam);
-	}
 	push(L, ...counter_defs);
 
-	// Sticky per-rule chains
-	for (let key in keys(sticky_rules)) {
-		let parts = match(key, /^(.+)_(ipv4|ipv6)$/);
-		if (!parts) continue;
-		let rule_name = parts[1], fam = parts[2];
-		let strategy = sticky_rules[key];
-		let saddr = (fam == 'ipv4') ? 'ip saddr' : 'ip6 saddr';
+	for (let fam in ['ipv4', 'ipv6'])
+		for (let rd in filter(rule_data[fam], rd => rd.has_sticky))
+			push(L, ...sticky_chain_lines(rd, fam));
 
-		push(L, sprintf('\tchain %s_rule_%s_%s {', NFT_PREFIX, rule_name, fam));
-		// Sticky map lookup: restore mark from previous session
-		push(L, sprintf('\t\tmeta mark & %s == 0 meta mark set %s map @%s_rule_%s_%s',
-			mwan4.mmx_mask, saddr, NFT_PREFIX, fam, rule_name));
-		// No sticky hit: let strategy assign mark
-		push(L, sprintf('\t\tmeta mark & %s == 0 jump %s_strategy_%s_%s',
-			mwan4.mmx_mask, NFT_PREFIX, strategy, fam));
-		// Update sticky map with current assignment
-		push(L, sprintf('\t\tmeta mark & %s != 0 meta mark & %s != %s update @%s_rule_%s_%s { %s : meta mark }',
-			mwan4.mmx_mask, mwan4.mmx_mask, mwan4.mmx_default, NFT_PREFIX, fam, rule_name, saddr));
-		push(L, '\t}');
-	}
-
-	// Main rules chains per family
 	for (let fam in ['ipv4', 'ipv6']) {
 		if (fam == 'ipv6' && mwan4.no_ipv6 != 0) continue;
-		push(L, sprintf('\tchain %s_rules_%s {', NFT_PREFIX, fam));
-
-		for (let rd in rule_data[fam]) {
-			let prefix = sprintf('%s meta mark & %s == 0', rd.match_str, mwan4.mmx_mask);
-
-			if (rd.global_logging && rd.rule_logging)
-				push(L, sprintf('\t\t%s log prefix "MWAN4(%s) " comment "%s"', prefix, rd.rule, rd.rule));
-
-			if (rd.has_sticky)
-				push(L, sprintf('\t\t%s %s jump %s_rule_%s_%s comment "%s"',
-					prefix, nft_counter_use(rd.counter), NFT_PREFIX, rd.rule, fam, rd.rule));
-			else
-				push(L, sprintf('\t\t%s %s %s comment "%s"', prefix, nft_counter_use(rd.counter), rd.mark_action, rd.rule));
-		}
-		push(L, '\t}');
+		push(L, ...rule_chain_lines(sprintf('%s_rules_%s', NFT_PREFIX, fam), rule_data[fam]));
+		push(L, ...rule_chain_lines(sprintf('%s_rules_out_%s', NFT_PREFIX, fam), filter(rule_data[fam], rd => rd.local)));
 	}
 
 	push(L, '}');
 
 	nft_file('add', 'rules', ...L);
 }
+
+// ── dnsmasq Domain Sets ──────────────────────────────────────────────
+
+// One entry per domain rule: the domains and the per-family nftset specs dnsmasq must fill.
+function domain_entries(rule_data) {
+	let entries = {};
+	for (let fam in ['ipv4', 'ipv6']) {
+		for (let rd in filter(rule_data[fam], rd => length(rd.domains))) {
+			entries[rd.rule] ??= { domains: rd.domains, specs: [] };
+			push(entries[rd.rule].specs, sprintf('%s#inet#%s#%s', fam == 'ipv4' ? '4' : '6', NFT_TABLE, rd.domain_set));
+		}
+	}
+	return values(entries);
+}
+
+function sync_dnsmasq(rule_data) {
+	if (dnsmasq.sync(domain_entries(rule_data)))
+		dnsmasq.restart();
+}
+
+// Domains of enabled rules, read straight from UCI (usable without building nft rules).
+prefetch_domains = function() {
+	let domains = [];
+	for (let s in ordered_rules())
+		if (rule_enabled(s)) push(domains, ...filter(map(as_list(s.domain), v => trim('' + v)), validate_hostname));
+	dnsmasq.prefetch(uniq(map(domains, d => lc(d))));
+};
 
 // ── Rebuild Dynamic File ─────────────────────────────────────────────
 
@@ -2525,6 +2604,17 @@ rebuild_dynamic = function() {
 };
 
 // ── Interface Routes ─────────────────────────────────────────────────
+
+// Tunnels have no netifd default route to copy, so their table gets `default dev <dev>`.
+function needs_default_route(iface) {
+	return uci_get(iface, 'type') == 'tunnel' || uci_get_bool(iface, 'default_route', false);
+}
+
+function create_default_route(iface, family, table_id) {
+	let device = network_get_device(iface);
+	if (!device || !validate_device_name(device)) return;
+	run(sprintf('%s route replace table %d default dev %s', family == 'ipv4' ? 'ip -4' : 'ip -6', table_id, shell_quote(device)));
+}
 
 function create_iface_route(iface) {
 	if (!validate_section_name(iface)) return;
@@ -2552,6 +2642,9 @@ function create_iface_route(iface) {
 			if (rc != 0)
 				LOG('debug', sprintf("Route '%s' already in table %d", route_line, table_id));
 		}
+
+		if (needs_default_route(iface))
+			create_default_route(iface, family, table_id);
 	});
 }
 
@@ -3744,6 +3837,9 @@ function get_capabilities() {
 		'bfd': {
 			'schema': BFD_SCHEMA,
 		},
+		'domains': {
+			'dnsmasq_nftset': dnsmasq.nftset_supported(),
+		},
 	};
 }
 
@@ -3753,6 +3849,74 @@ function contract_problem(code, section, message) {
 		'section': section || null,
 		'message': message,
 	};
+}
+
+const RULE_ADDRESS_ERRORS = { src_ip: 'invalidRuleSourceAddress', dest_ip: 'invalidRuleDestinationAddress' };
+const RULE_PORT_ERRORS = { src_port: 'invalidRuleSourcePort', dest_port: 'invalidRuleDestinationPort' };
+
+function validate_rule_ports(s, proto, report) {
+	let name = s['.name'];
+	for (let field in ['src_port', 'dest_port']) {
+		if (!s[field]) continue;
+		if (proto != 'tcp' && proto != 'udp')
+			report.error('invalidRulePortProtocol', name,
+				sprintf("Rule '%s' uses %s with non-TCP/UDP protocol '%s'.", name, field, proto || s.proto || ''));
+		if (normalize_ports(s[field]) == null)
+			report.error(RULE_PORT_ERRORS[field], name, sprintf("Rule '%s' has invalid %s '%s'.", name, field, s[field]));
+	}
+}
+
+// An address must be valid for at least one family the rule applies to.
+function validate_rule_addresses(s, report) {
+	let name = s['.name'];
+	let families = as_list(s.family);
+	let applicable = length(families) ? families : ['ipv4', 'ipv6'];
+	for (let field in ['src_ip', 'dest_ip']) {
+		for (let addr in as_list(s[field])) {
+			if (!length(filter(applicable, f => validate_rule_address(fix_rule_address(addr, f), f))))
+				report.error(RULE_ADDRESS_ERRORS[field], name, length(families)
+					? sprintf("Rule '%s' %s '%s' does not match family '%s'.", name, field, addr, join(',', families))
+					: sprintf("Rule '%s' has invalid %s '%s'.", name, field, addr));
+		}
+		if (!length(families) && length(as_list(s[field])))
+			report.warning('implicitRuleAddressFamily', name, sprintf("Rule '%s' uses %s without an explicit family.", name, field));
+	}
+}
+
+function validate_rule_matches(s, report) {
+	let name = s['.name'];
+	for (let mac in as_list(s.src_mac))
+		if (!validate_mac(mac))
+			report.error('invalidRuleSourceMac', name, sprintf("Rule '%s' has invalid src_mac '%s'.", name, mac));
+	for (let domain in as_list(s.domain))
+		if (!validate_hostname(domain))
+			report.error('invalidRuleDomain', name, sprintf("Rule '%s' has invalid domain '%s'.", name, domain));
+	if (s.dscp != null && !validate_dscp(s.dscp))
+		report.error('invalidRuleDscp', name, sprintf("Rule '%s' dscp '%s' must be 1-63.", name, s.dscp));
+	if (s.ipset && !validate_nft_identifier(s.ipset))
+		report.error('invalidRuleIpset', name, sprintf("Rule '%s' ipset '%s' is not a safe nftables identifier.", name, s.ipset));
+}
+
+function validate_rule(s, strategies, builtin_strategies, report) {
+	let name = s['.name'];
+	let proto = normalize_protocol(s.proto || 'all');
+
+	if (length(name) > 15)
+		report.error('ruleNameTooLong', name, sprintf("Rule '%s' name exceeds 15 characters.", name));
+
+	if (s.use_strategy && !strategies[s.use_strategy] && !builtin_strategies[s.use_strategy])
+		report.error('invalidRuleStrategy', name, sprintf("Rule '%s' references unknown strategy '%s'.", name, s.use_strategy));
+
+	if (!proto)
+		report.error('invalidRuleProtocol', name, sprintf("Rule '%s' has unsupported protocol '%s'.", name, s.proto || ''));
+
+	for (let family in as_list(s.family))
+		if (family != 'ipv4' && family != 'ipv6')
+			report.error('invalidRuleFamily', name, sprintf("Rule '%s' uses unsupported family '%s'.", name, family));
+
+	validate_rule_ports(s, proto, report);
+	validate_rule_addresses(s, report);
+	validate_rule_matches(s, report);
 }
 
 function validate_config() {
@@ -3916,58 +4080,12 @@ function validate_config() {
 	};
 
 	uci_foreach('rule', function(s) {
-		let name = s['.name'];
-		let strategy = s.use_strategy;
-		let proto = normalize_protocol(s.proto || 'all');
-		let families = as_list(s.family);
+		validate_rule(s, strategies, builtin_strategies, { error: validation_error, warning: validation_warning });
 		counts.rules++;
-
-		if (strategy && !strategies[strategy] && !builtin_strategies[strategy])
-			validation_error('invalidRuleStrategy', name,
-				sprintf("Rule '%s' references unknown strategy '%s'.", name, strategy));
-
-		if (!proto)
-			validation_error('invalidRuleProtocol', name,
-				sprintf("Rule '%s' has unsupported protocol '%s'.", name, s.proto || ''));
-
-		for (let family in families)
-			if (family != 'ipv4' && family != 'ipv6')
-				validation_error('invalidRuleFamily', name,
-					sprintf("Rule '%s' uses unsupported family '%s'.", name, family));
-
-		let port_proto_ok = proto == 'tcp' || proto == 'udp';
-		for (let port_field in ['src_port', 'dest_port']) {
-			let port_value = s[port_field];
-			if (!port_value) continue;
-			if (!port_proto_ok)
-				validation_error('invalidRulePortProtocol', name,
-					sprintf("Rule '%s' uses %s with non-TCP/UDP protocol '%s'.", name, port_field, proto || s.proto || ''));
-			if (normalize_ports(port_value) == null)
-				validation_error(port_field == 'src_port' ? 'invalidRuleSourcePort' : 'invalidRuleDestinationPort', name,
-					sprintf("Rule '%s' has invalid %s '%s'.", name, port_field, port_value));
-		}
-
-		for (let addr_field in ['src_ip', 'dest_ip']) {
-			let addr = s[addr_field];
-			if (!addr) continue;
-			if (length(families)) {
-				for (let family in families)
-					if ((family == 'ipv4' || family == 'ipv6') && !validate_rule_address(addr, family))
-						validation_error(addr_field == 'src_ip' ? 'invalidRuleSourceAddress' : 'invalidRuleDestinationAddress', name,
-							sprintf("Rule '%s' %s '%s' does not match family '%s'.", name, addr_field, addr, family));
-			} else if (!rule_address_valid_any(addr)) {
-				validation_error(addr_field == 'src_ip' ? 'invalidRuleSourceAddress' : 'invalidRuleDestinationAddress', name,
-					sprintf("Rule '%s' has invalid %s '%s'.", name, addr_field, addr));
-			} else {
-				validation_warning('implicitRuleAddressFamily', name,
-					sprintf("Rule '%s' uses %s without an explicit family.", name, addr_field));
-			}
-		}
-
-		if (s.ipset && !validate_nft_identifier(s.ipset))
-			validation_error('invalidRuleIpset', name,
-				sprintf("Rule '%s' ipset '%s' is not a safe nftables identifier.", name, s.ipset));
 	});
+
+	if (!dnsmasq.nftset_supported() && length(filter(ordered_rules(), s => rule_enabled(s) && length(as_list(s.domain)))))
+		validation_warning('dnsmasqNftsetMissing', null, 'Domain rules need dnsmasq-full with nftset support.');
 
 	let tunnel_context = get_tunnel_context();
 	counts.tunnels = length(keys(tunnel_context.tunnels));
@@ -5202,6 +5320,11 @@ function address_match(actual, expected, family) {
 	return lc(actual) == lc(expected);
 }
 
+function address_list_match(actual, expected, family) {
+	let candidates = as_list(expected);
+	return !length(candidates) || length(filter(candidates, e => address_match(actual, e, family))) > 0;
+}
+
 function port_match(actual, expected) {
 	expected = normalize_ports(expected);
 	if (expected == null) return false;
@@ -5247,10 +5370,12 @@ function explain_rule_match(rule, family, input) {
 	add_check('family', rule_family_matches(rule, family), join(',', as_list(rule.family)), family);
 	if (proto != 'all')
 		add_check('proto', proto == input_proto, proto, input_proto);
+	if (!rule_enabled(rule))
+		add_check('enabled', false, 'enabled', 'disabled');
 	if (rule.src_ip)
-		add_check('src_ip', address_match(input.src_ip, rule.src_ip, family), rule.src_ip, input.src_ip);
+		add_check('src_ip', address_list_match(input.src_ip, rule.src_ip, family), join(',', as_list(rule.src_ip)), input.src_ip);
 	if (rule.dest_ip)
-		add_check('dest_ip', address_match(input.dest_ip, rule.dest_ip, family), rule.dest_ip, input.dest_ip);
+		add_check('dest_ip', address_list_match(input.dest_ip, rule.dest_ip, family), join(',', as_list(rule.dest_ip)), input.dest_ip);
 	if (rule.src_iface)
 		add_check('src_iface', rule.src_iface == input.src_iface, rule.src_iface, input.src_iface);
 	if (rule.src_port)
@@ -5362,12 +5487,12 @@ function diagnostics_explain(args) {
 	let rules = [];
 	let matched_rule = null;
 
-	uci_foreach('rule', function(rule) {
+	for (let rule in ordered_rules()) {
 		let explanation = explain_rule_match(rule, family, input);
 		push(rules, explanation);
 		if (!matched_rule && explanation.matched)
 			matched_rule = explanation;
-	});
+	}
 
 	let strategy = args.strategy || matched_rule?.use_strategy || null;
 	let decision = strategy ? explain_strategy_decision(strategy, family) : {
@@ -5598,6 +5723,8 @@ mwan4.TRACK_STATUS_DIR = TRACK_STATUS_DIR;
 // Core
 mwan4.init = init;
 mwan4.load = load;
+mwan4.reload = reload;
+mwan4.id2mask = id2mask;
 mwan4.LOG = LOG;
 mwan4.set_scriptname = set_scriptname;
 mwan4.read_str = read_str;
@@ -5628,6 +5755,10 @@ mwan4.validate_mptcp_address      = validate_mptcp_address;
 mwan4.validate_mptcp_flag         = validate_mptcp_flag;
 mwan4.validate_nft_identifier     = validate_nft_identifier;
 mwan4.validate_device_name        = validate_device_name;
+mwan4.validate_mac                = validate_mac;
+mwan4.validate_dscp               = validate_dscp;
+mwan4.validate_hostname           = validate_hostname;
+mwan4.validate_rule_address       = validate_rule_address;
 mwan4.uci_section_names           = uci_section_names;
 
 // Getters
@@ -5664,11 +5795,15 @@ mwan4.set_connected_ipv6 = set_connected_ipv6;
 mwan4.set_dynamic_nftset = set_dynamic_nftset;
 mwan4.rebuild_iface_nftfile = rebuild_iface_nftfile;
 mwan4.set_strategies_nftables = set_strategies_nftables;
+mwan4.collect_user_rules = collect_user_rules;
 mwan4.set_user_rules = set_user_rules;
+mwan4.sync_dnsmasq = sync_dnsmasq;
+mwan4.prefetch_domains = prefetch_domains;
 mwan4.rebuild_dynamic = rebuild_dynamic;
 
 // Interface management
 mwan4.create_iface_route = create_iface_route;
+mwan4.needs_default_route = needs_default_route;
 mwan4.delete_iface_route = delete_iface_route;
 mwan4.create_iface_rules = create_iface_rules;
 mwan4.delete_iface_rules = delete_iface_rules;

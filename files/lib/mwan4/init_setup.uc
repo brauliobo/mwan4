@@ -31,13 +31,17 @@ m.apply_mptcp_config();
 m.rebuild_dynamic();
 
 // Generate rules file (sets + user rules)
+let rules = m.collect_user_rules();
 m.nft_file('create', 'rules');
 m.set_dynamic_nftset();
 m.set_connected_ipv4();
 m.set_connected_ipv6();
 m.set_custom_nftset();
-m.set_user_rules();
+m.set_user_rules(rules);
 
-// Validate combined and install
+// dnsmasq must know the domain sets before fw4 reload prefetches them
+m.sync_dnsmasq(rules);
+
+// Validate combined and install (fw4 reload prefetches domain sets)
 m.nft_file('install', 'all');
 m.fw4_reload();

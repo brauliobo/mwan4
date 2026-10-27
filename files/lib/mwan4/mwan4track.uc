@@ -84,19 +84,25 @@ function hotplug(action, extra) {
 	system(cmd);
 }
 
+// Tunnels without a netifd default route are probed with their own mark, which
+// selects their mwan4 table (holding `default dev <dev>`); other WANs use the default mark.
+function probe_mark() {
+	return m.needs_default_route(INTERFACE) ? m.get_iface_mark(INTERFACE) : m.mmx_default;
+}
+
+function wrapped(cmd) {
+	return sprintf('FAMILY=%s DEVICE=%s SRCIP=%s FWMARK=%s LD_PRELOAD=/lib/mwan4/libwrap_mwan4_sockopt.so.1.0 %s',
+		m.shell_quote(FAMILY), m.shell_quote(DEVICE), m.shell_quote(SRC_IP), m.shell_quote(probe_mark()), cmd);
+}
+
 function wrap(cmd) {
 	if (!m.validate_device_name(DEVICE)) return 1;
-	return system(sprintf(
-		'FAMILY=%s DEVICE=%s SRCIP=%s FWMARK=%s LD_PRELOAD=/lib/mwan4/libwrap_mwan4_sockopt.so.1.0 %s',
-		m.shell_quote(FAMILY), m.shell_quote(DEVICE), m.shell_quote(SRC_IP), m.shell_quote(m.mmx_default), cmd));
+	return system(wrapped(cmd));
 }
 
 function wrap_output(cmd) {
 	if (!m.validate_device_name(DEVICE)) return { rc: 1, out: '' };
-	let full = sprintf(
-		'FAMILY=%s DEVICE=%s SRCIP=%s FWMARK=%s LD_PRELOAD=/lib/mwan4/libwrap_mwan4_sockopt.so.1.0 %s',
-		m.shell_quote(FAMILY), m.shell_quote(DEVICE), m.shell_quote(SRC_IP), m.shell_quote(m.mmx_default), cmd);
-	let p = popen(full + ' 2>/dev/null', 'r');
+	let p = popen(wrapped(cmd) + ' 2>/dev/null', 'r');
 	if (!p) return { rc: 1, out: '' };
 	let out = p.read('all') || '';
 	let rc = p.close();

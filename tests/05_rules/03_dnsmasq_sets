@@ -1,0 +1,86 @@
+Testing dnsmasq nftset file generation, restart-on-change and domain prefetch.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] },
+		{ ".name": "wan6", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv6"] }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wan6_r", "interface": "wan6", "metric": "1", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "balanced", "use_route": ["wan_r", "wan6_r"] }
+	],
+	"rule": [
+		{ ".name": "streaming", "domain": ["example.com", "Cdn.Example.net"], "use_strategy": "balanced" },
+		{ ".name": "v4only", "domain": ["example.com", "legacy.example.org"], "use_strategy": "balanced", "family": ["ipv4"] },
+		{ ".name": "off", "enabled": "0", "domain": ["disabled.example.org"], "use_strategy": "balanced" },
+		{ ".name": "bad", "domain": ["bad host;flush"], "use_strategy": "balanced" },
+		{ ".name": "plain", "dest_port": "22", "proto": "tcp", "use_strategy": "balanced" }
+	]
+}
+-- End --
+
+-- File uci/dhcp.json --
+{
+	"dnsmasq": [
+		{ ".name": "main" },
+		{ ".name": "alt", "confdir": "/tmp/alt.d,*.conf" }
+	]
+}
+-- End --
+
+-- File fs/popen~dnsmasq_--version_2_dev_null.txt --
+Compile time options: IPv6 GNU-getopt DHCP nftset auth
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+import dnsmasq from 'dnsmasq';
+m.set_scriptname('test');
+m.init();
+
+let calls = [];
+global.system = (cmd) => { push(calls, cmd); return 0; };
+
+function step(title, action) {
+	calls = [];
+	action();
+	print('--- ' + title + ' (' + length(calls) + ' commands)\n');
+	for (let c in calls) print(c + '\n');
+}
+
+let rules = m.collect_user_rules();
+step('first sync', () => m.sync_dnsmasq(rules));
+print(global.mocklib.read_captured('/tmp/dnsmasq.main.d/mwan4.conf'));
+print('same file for custom conf-dir: ' + (global.mocklib.read_captured('/tmp/alt.d/mwan4.conf') == global.mocklib.read_captured('/tmp/dnsmasq.main.d/mwan4.conf')) + '\n');
+step('unchanged sync', () => m.sync_dnsmasq(rules));
+step('prefetch', () => m.prefetch_domains());
+step('no domain rules', () => m.sync_dnsmasq({ ipv4: [], ipv6: [] }));
+print('file removed: ' + !global.mocklib.has_captured('/tmp/dnsmasq.main.d/mwan4.conf') + '\n');
+step('nothing to remove', () => m.sync_dnsmasq({ ipv4: [], ipv6: [] }));
+print('--- shared domains\n');
+print(dnsmasq.render([{ domains: ['a.example'], specs: ['4#inet#fw4#s4'] }, { domains: ['a.example', 'b.example'], specs: ['4#inet#fw4#t4', '6#inet#fw4#t6'] }]));
+-- End --
+
+-- Expect stdout --
+--- first sync (1 commands)
+/etc/init.d/dnsmasq running && /etc/init.d/dnsmasq restart >/dev/null 2>&1
+nftset=/example.com/4#inet#fw4#mwan4_dom_streaming_ipv4,6#inet#fw4#mwan4_dom_streaming_ipv6,4#inet#fw4#mwan4_dom_v4only_ipv4
+nftset=/cdn.example.net/4#inet#fw4#mwan4_dom_streaming_ipv4,6#inet#fw4#mwan4_dom_streaming_ipv6
+nftset=/legacy.example.org/4#inet#fw4#mwan4_dom_v4only_ipv4
+same file for custom conf-dir: true
+--- unchanged sync (0 commands)
+--- prefetch (1 commands)
+(n=0; until nslookup localhost 127.0.0.1 >/dev/null 2>&1 || [ $n -ge 20 ]; do n=$((n+1)); sleep 1; done; for d in 'example.com' 'cdn.example.net' 'legacy.example.org'; do nslookup "$d" 127.0.0.1 >/dev/null 2>&1; done) >/dev/null 2>&1 &
+--- no domain rules (1 commands)
+/etc/init.d/dnsmasq running && /etc/init.d/dnsmasq restart >/dev/null 2>&1
+file removed: true
+--- nothing to remove (0 commands)
+--- shared domains
+nftset=/a.example/4#inet#fw4#s4,4#inet#fw4#t4,6#inet#fw4#t6
+nftset=/b.example/4#inet#fw4#t4,6#inet#fw4#t6
+-- End --

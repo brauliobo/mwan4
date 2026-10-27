@@ -34,6 +34,7 @@ define Package/mwan4
     +nftables-json \
     +rpcd-mod-ucode
   SUGGESTS:= \
+    dnsmasq-full \
     iputils-arping \
     httping \
     nping
@@ -42,7 +43,8 @@ endef
 define Package/mwan4/description
   Multiwan hotplug script with connection tracking support using nftables.
   Supports loadbalancing/failover for up to 254 WAN interfaces with
-  firewall4/nftables integration.
+  firewall4/nftables integration. Domain based rules need dnsmasq-full
+  (nftset support).
 endef
 
 define Package/mwan4/conffiles
@@ -82,6 +84,8 @@ define Package/mwan4/install
 	$(INSTALL_DATA) ./files/lib/mwan4/mwan4.uc \
 		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/packages.uc \
+		$(1)/lib/mwan4/
+	$(INSTALL_DATA) ./files/lib/mwan4/dnsmasq.uc \
 		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/cli.uc \
 		$(1)/lib/mwan4/

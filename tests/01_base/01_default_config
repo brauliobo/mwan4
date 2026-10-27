@@ -58,9 +58,20 @@ table inet fw4 {
 	chain mwan4_rules_ipv6 {
 	}
 
+	chain mwan4_rules_out_ipv4 {
+	}
+
+	chain mwan4_rules_out_ipv6 {
+	}
+
 	chain mwan4_rules {
 		meta nfproto ipv4 jump mwan4_rules_ipv4
 		meta nfproto ipv6 jump mwan4_rules_ipv6
+	}
+
+	chain mwan4_rules_out {
+		meta nfproto ipv4 jump mwan4_rules_out_ipv4
+		meta nfproto ipv6 jump mwan4_rules_out_ipv6
 	}
 
 	chain mwan4_prerouting {
@@ -114,7 +125,7 @@ table inet fw4 {
 		meta mark & 0x3f00 == 0 ip6 daddr @mwan4_custom_ipv6 meta mark set meta mark & 0xffffc0ff | 0x3f00
 		meta mark & 0x3f00 == 0 ip6 daddr @mwan4_connected_ipv6 meta mark set meta mark & 0xffffc0ff | 0x3f00
 		meta mark & 0x3f00 == 0 ip6 daddr @mwan4_dynamic_ipv6 meta mark set meta mark & 0xffffc0ff | 0x3f00
-		meta mark & 0x3f00 == 0 jump mwan4_rules
+		meta mark & 0x3f00 == 0 jump mwan4_rules_out
 		meta mark & 0x3f00 == 0 ct mark set ct mark & 0xffffc0ff
 		meta mark & 0x3f00 == 0x100 ct mark set ct mark & 0xffffc0ff | 0x100
 		meta mark & 0x3f00 == 0x200 ct mark set ct mark & 0xffffc0ff | 0x200

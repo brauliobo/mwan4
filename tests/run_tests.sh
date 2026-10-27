@@ -7,24 +7,29 @@ ucode=""
 if command -v ucode >/dev/null 2>&1; then
 	have_ucode=1
 
-	# Create a patched copy of mwan4.uc that converts ES module imports to require()
-	# calls, so the mock framework can intercept them through the module cache.
-	# The original uses: import { readfile, ... } from 'fs'; import { cursor } from 'uci';
-	# We convert to: let _fs = require('fs'), readfile = _fs.readfile, ...;
+	# Create patched copies of the library modules that convert ES module imports of
+	# fs/uci to require() calls, so the mock framework can intercept them through the
+	# module cache. Each `import { a, b } from 'fs';` becomes
+	# `let _fs = require('fs'), a = _fs.a, b = _fs.b;`.
 	patch_dir="/tmp/mwan4_test_modules.$$"
 	mkdir -p "$patch_dir"
 
-	sed \
-		-e "s|import { readfile, writefile, popen, stat, unlink } from 'fs';|let _fs = require('fs'), readfile = _fs.readfile, writefile = _fs.writefile, popen = _fs.popen, stat = _fs.stat, unlink = _fs.unlink;|" \
-		-e "s|import { cursor } from 'uci';|let _uci = require('uci'), cursor = _uci.cursor;|" \
-		./files/lib/mwan4/mwan4.uc > "$patch_dir/mwan4.uc"
+	for module in mwan4 packages dnsmasq; do
+		awk '
+			/^import \{ .* \} from .(fs|uci).;$/ {
+				mod = $0; sub(/.*from \x27/, "", mod); sub(/\x27;.*/, "", mod)
+				names = $0; sub(/^import \{ /, "", names); sub(/ \} from.*/, "", names)
+				n = split(names, a, /, */)
+				out = "let _" mod " = require(\x27" mod "\x27)"
+				for (i = 1; i <= n; i++) out = out ", " a[i] " = _" mod "." a[i]
+				print out ";"
+				next
+			}
+			{ print }
+		' "./files/lib/mwan4/$module.uc" > "$patch_dir/$module.uc"
+	done
 
-	sed \
-		-e "s|import { popen } from 'fs';|let _fs = require('fs'), popen = _fs.popen;|" \
-		./files/lib/mwan4/packages.uc > "$patch_dir/packages.uc"
-
-	sed \
-		-e "s|import m from '/lib/mwan4/mwan4.uc';|import m from 'mwan4';|" \
+	sed -e "s|'/lib/mwan4/\([a-z0-9_]*\)\.uc'|'\1'|" \
 		./files/usr/share/rpcd/ucode/mwan4 > "$patch_dir/rpcd_mwan4.uc"
 
 	trap "rm -rf '$patch_dir'" EXIT
