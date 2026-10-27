@@ -122,7 +122,8 @@ migrate_family() {
 	local family
 
 	config_get family "$name" family
-	if [ -n "$family" ]; then
+	# config_get joins a list with spaces: only a single value can be an old 'option family'
+	if [ -n "$family" ] && [ "${family#* }" = "$family" ]; then
 		uci_remove mwan4 "$name" family
 		uci_add_list mwan4 "$name" family "$family"
 	fi
