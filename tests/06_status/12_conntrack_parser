@@ -1,0 +1,70 @@
+Conntrack parser: IPv6 shortening, rule id extraction under a scattered mask and entry parsing.
+
+-- Testcase --
+import c from 'connections';
+
+let show = (title, data) => print(title + ' ' + replace(sprintf('%.J', data), /\s*\n\s*/g, ' ') + '\n');
+
+for (let addr in [
+	'0000:0000:0000:0000:0000:0000:0000:0000', '0000:0000:0000:0000:0000:0000:0000:0001', '2001:0db8:0000:0000:0000:0000:0000:0001',
+	'2001:0db8:0000:0001:0000:0000:0000:0001', '2001:0db8:0000:0001:0000:0001:0000:0001', 'fe80:0000:0000:0000:62be:b4ff:fe1a:5cb4',
+	'2804:01b1:e000:a09f:62be:b4ff:fe1a:5cb4', '0001:0000:0000:0000:0000:0000:0000:0000', '2001:0000:0001:0001:0001:0001:0001:0001'])
+	print(addr + ' -> ' + c.compress_ipv6(addr) + '\n');
+
+// Scattered mask 0x00a50000: bits 16, 18, 21 and 23 form a dense 4 bit id.
+for (let id in [0, 1, 2, 5, 9, 15]) {
+	let value = 0;
+	let bit_of = [16, 18, 21, 23];
+	for (let i = 0; i < 4; i++) if ((id >> i) & 1) value |= 1 << bit_of[i];
+	print('gather ' + id + ': ' + c.gather_bits(value | 0x100 | 0xff00c0ff, 0x00a50000) + '\n');
+}
+
+let line = (family, proto, rest, mark) => sprintf('%s     2 %s %s mark=%d zone=0 use=2', family, proto, rest, mark);
+let text = join('\n', [
+	line('ipv4', 'tcp      6', '60 SYN_SENT src=10.0.0.2 dst=1.1.1.1 sport=1000 dport=443 [UNREPLIED] src=1.1.1.1 dst=10.0.0.2 sport=443 dport=1000', 0x210100),
+	line('ipv4', 'udp      17', '30 src=10.0.0.3 dst=8.8.8.8 sport=2000 dport=53 packets=2 bytes=100 src=8.8.8.8 dst=10.0.0.3 sport=53 dport=2000 packets=3 bytes=300', 0xa50200),
+	line('ipv4', 'icmp     1', '10 src=10.0.0.4 dst=9.9.9.9 type=8 code=0 id=7 [UNREPLIED] src=9.9.9.9 dst=10.0.0.4 type=0 code=0 id=7', 0x100),
+	line('ipv6', 'tcp      6', '99 ESTABLISHED src=fd00:0000:0000:0000:0000:0000:0000:0005 dst=2001:0db8:0000:0000:0000:0000:0000:0001 sport=3000 dport=22 src=2001:0db8:0000:0000:0000:0000:0000:0001 dst=fd00:0000:0000:0000:0000:0000:0000:0005 sport=22 dport=3000 [ASSURED]', 0x210200),
+	line('ipv4', 'tcp      6', '5 CLOSE src=10.0.0.6 dst=1.1.1.1 sport=4000 dport=80 src=1.1.1.1 dst=10.0.0.6 sport=80 dport=4000', 0x210000),
+	'garbage line without a mark',
+	'',
+]);
+
+let scan = c.scan(text, { wan_mask: 0x3f00, rule_mask: 0x00a50000 }, (family, id, wan) => id == 5);
+show('total', scan.counts.total);
+show('rules', scan.counts.rules);
+show('wans', scan.counts.wans);
+show('wanted', map(scan.entries, e => e.src + '>' + e.dst + ' rule=' + e.rule_id + ' wan=' + e.wan));
+
+for (let e in c.scan(text, { wan_mask: 0x3f00, rule_mask: 0x00a50000 }, () => true).entries)
+	show(e.proto, { ...e, mark: sprintf('0x%x', e.mark) });
+
+show('no rule bits', c.scan(text, { wan_mask: 0x3f00, rule_mask: 0 }).counts.rules);
+-- End --
+
+-- Expect stdout --
+0000:0000:0000:0000:0000:0000:0000:0000 -> ::
+0000:0000:0000:0000:0000:0000:0000:0001 -> ::1
+2001:0db8:0000:0000:0000:0000:0000:0001 -> 2001:db8::1
+2001:0db8:0000:0001:0000:0000:0000:0001 -> 2001:db8:0:1::1
+2001:0db8:0000:0001:0000:0001:0000:0001 -> 2001:db8:0:1:0:1:0:1
+fe80:0000:0000:0000:62be:b4ff:fe1a:5cb4 -> fe80::62be:b4ff:fe1a:5cb4
+2804:01b1:e000:a09f:62be:b4ff:fe1a:5cb4 -> 2804:1b1:e000:a09f:62be:b4ff:fe1a:5cb4
+0001:0000:0000:0000:0000:0000:0000:0000 -> 1::
+2001:0000:0001:0001:0001:0001:0001:0001 -> 2001:0:1:1:1:1:1:1
+gather 0: 0
+gather 1: 1
+gather 2: 2
+gather 5: 5
+gather 9: 9
+gather 15: 15
+total { "ipv4": 3, "ipv6": 1, "total": 4 }
+rules { "5": { "ipv4": 1, "ipv6": 1, "total": 2 }, "15": { "ipv4": 1, "ipv6": 0, "total": 1 }, "0": { "ipv4": 1, "ipv6": 0, "total": 1 } }
+wans { "256": { "ipv4": 2, "ipv6": 0, "total": 2 }, "512": { "ipv4": 1, "ipv6": 1, "total": 2 } }
+wanted [ "10.0.0.2>1.1.1.1 rule=5 wan=256", "fd00::5>2001:db8::1 rule=5 wan=512" ]
+tcp { "family": "ipv4", "proto": "tcp", "timeout": 60, "state": "SYN_SENT", "src": "10.0.0.2", "dst": "1.1.1.1", "sport": 1000, "dport": 443, "packets": 0, "bytes": 0, "mark": "0x210100", "rule_id": 5, "wan": 256 }
+udp { "family": "ipv4", "proto": "udp", "timeout": 30, "state": "", "src": "10.0.0.3", "dst": "8.8.8.8", "sport": 2000, "dport": 53, "packets": 5, "bytes": 400, "mark": "0xa50200", "rule_id": 15, "wan": 512 }
+icmp { "family": "ipv4", "proto": "icmp", "timeout": 10, "state": "", "src": "10.0.0.4", "dst": "9.9.9.9", "sport": null, "dport": null, "packets": 0, "bytes": 0, "mark": "0x100", "rule_id": 0, "wan": 256 }
+tcp { "family": "ipv6", "proto": "tcp", "timeout": 99, "state": "ESTABLISHED", "src": "fd00::5", "dst": "2001:db8::1", "sport": 3000, "dport": 22, "packets": 0, "bytes": 0, "mark": "0x210200", "rule_id": 5, "wan": 512 }
+no rule bits { "0": { "ipv4": 3, "ipv6": 1, "total": 4 } }
+-- End --
