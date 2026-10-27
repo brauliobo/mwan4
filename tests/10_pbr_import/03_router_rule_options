@@ -669,7 +669,7 @@ function dump_sections(stype) {
 }
 
 function dump_options(section) {
-	let keys_ = sort(filter(keys(section), k => index(k, '.') != 0));
+	let keys_ = sort(filter(keys(section), k => index(k, '.') != 0 && k != 'rule_id'));
 	return join(' ', map(keys_, k => k + '=' + (type(section[k]) == 'array' ? '[' + join(',', section[k]) + ']' : section[k])));
 }
 
@@ -681,6 +681,9 @@ let rules = {};
 for (let r in dump_sections('rule')) rules[r['.name']] = r;
 for (let name in ['youtube', 'discord_voi', 'cloudflare', 'meta_quest', 'jitsi_1', 'jitsi_2', 'google_me_2_1', 'google_me_2_2', 'google_me_3_1', 'mc_wan2', 'hcaptcha'])
 	print(name + ': ' + dump_options(rules[name]) + '\n');
+
+let ids = map(filter(values(rules), r => r['.name'] != 'default_rule_v4' && r['.name'] != 'default_rule_v6'), r => r.rule_id);
+print('rule ids: ' + length(ids) + ' assigned, ' + length(uniq(ids)) + ' unique, ' + length(filter(ids, id => !(id >= 1 && id <= 63))) + ' out of range\n');
 -- End --
 
 -- Expect stdout --
@@ -695,4 +698,5 @@ google_me_2_2: dest_port=19302-19309 enabled=0 label=google meet media local=0 p
 google_me_3_1: dest_port=3478 enabled=0 label=google meet media local=0 pbr_import=1 proto=tcp use_strategy=tim_first
 mc_wan2: domain=[mcpvp.club,catpvp.net] enabled=1 label=mc wan2 local=0 pbr_import=1 use_strategy=tim_first
 hcaptcha: domain=[hcaptcha.com,newassets.hcaptcha.com,imgs.hcaptcha.com,api.hcaptcha.com,js.hcaptcha.com] enabled=1 label=hcaptcha local=0 pbr_import=1 use_strategy=vpnu_usmi_only
+rule ids: 40 assigned, 40 unique, 0 out of range
 -- End --

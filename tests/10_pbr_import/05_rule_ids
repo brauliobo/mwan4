@@ -1,0 +1,74 @@
+Imported rules get rule ids without disturbing existing ones, and keep them when the import is applied again.
+
+-- File uci/pbr.json --
+{
+	"pbr": [{ ".name": "config", "supported_interface": ["wg0"] }],
+	"policy": [
+		{ "name": "web", "dest_addr": "example.com", "interface": "wan" },
+		{ "name": "dns", "dest_addr": "9.9.9.9", "dest_port": "53", "proto": "tcp udp", "interface": "wan" },
+		{ "name": "voice", "dest_addr": "discord.com", "interface": "wg0" }
+	]
+}
+-- End --
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"], "track_ip": ["1.1.1.1"] }
+	],
+	"route": [{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" }],
+	"strategy": [{ ".name": "custom", "use_route": ["wan_r"] }],
+	"rule": [
+		{ ".name": "keeper", "rule_id": "2", "dest_port": "443", "proto": "tcp", "use_strategy": "custom" },
+		{ ".name": "default_rule_v4", "dest_ip": "0.0.0.0/0", "use_strategy": "custom", "family": ["ipv4"] },
+		{ ".name": "default_rule_v6", "dest_ip": "::/0", "use_strategy": "custom", "family": ["ipv6"] }
+	]
+}
+-- End --
+
+-- File uci/network.json --
+{
+	"interface": [
+		{ ".name": "wan", "proto": "dhcp" },
+		{ ".name": "wg0", "proto": "wireguard", "addresses": ["10.9.0.2/32"] }
+	],
+	"wireguard_wg0": [{ "allowed_ips": ["0.0.0.0/0"] }]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+import importer from 'pbr_import';
+
+m.set_scriptname('test');
+m.init();
+
+let rule_ids = () => {
+	let c = require('uci').cursor();
+	c.load('mwan4');
+	let ids = [];
+	c.foreach('mwan4', 'rule', s => push(ids, s['.name'] + '=' + (s.rule_id ?? '-')));
+	return join(' ', ids);
+};
+
+importer.pbr_import({ apply: true });
+let first = rule_ids();
+print('first import: ' + first + '\n');
+
+importer.pbr_import({ apply: true });
+print('second import identical: ' + (rule_ids() == first) + '\n');
+
+let c = require('uci').cursor();
+c.load('mwan4');
+c.set('mwan4', 'web', 'rule_id', '40');
+c.commit('mwan4');
+importer.pbr_import({ apply: true });
+print('custom id kept on re-import: ' + rule_ids() + '\n');
+-- End --
+
+-- Expect stdout --
+first import: keeper=2 web=1 dns_1=3 dns_2=4 voice=5 default_rule_v4=- default_rule_v6=-
+second import identical: true
+custom id kept on re-import: keeper=2 web=40 dns_1=3 dns_2=4 voice=5 default_rule_v4=- default_rule_v6=-
+-- End --

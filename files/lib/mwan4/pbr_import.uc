@@ -405,6 +405,13 @@ function remove_previous(c) {
 	for (let name in stale) c.delete('mwan4', name);
 }
 
+// Re-importing keeps the rule_id of every rule that comes back under the same name.
+function rule_ids(c) {
+	let ids = {};
+	c.foreach('mwan4', 'rule', s => s.rule_id != null ? (ids[s['.name']] = s.rule_id) : null);
+	return ids;
+}
+
 // Default catch-alls must stay the last rules.
 function move_defaults_last(c) {
 	let count = 0;
@@ -418,6 +425,7 @@ function write_plan(plan) {
 	c.load('mwan4');
 	writefile(BACKUP, readfile('/etc/config/mwan4') || '');
 
+	let ids = rule_ids(c);
 	remove_previous(c);
 	for (let iface in plan.interfaces) add_section(c, iface.name, 'interface', iface.options);
 	for (let strategy in plan.strategies) {
@@ -425,7 +433,8 @@ function write_plan(plan) {
 			add_section(c, route.name, 'route', { interface: route.interface, metric: '' + route.metric, weight: '1', [MARKER]: '1' });
 		add_section(c, strategy.name, 'strategy', { use_route: map(strategy.routes, r => r.name), last_resort: 'unreachable', [MARKER]: '1' });
 	}
-	for (let rule in plan.rules) add_section(c, rule.name, 'rule', rule.options);
+	for (let rule in plan.rules) add_section(c, rule.name, 'rule', { ...rule.options, rule_id: ids[rule.name] });
+	m.assign_rule_ids(c);
 	move_defaults_last(c);
 
 	c.save('mwan4');
