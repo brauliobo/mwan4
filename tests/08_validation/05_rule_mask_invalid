@@ -1,0 +1,36 @@
+A rule_mask that is not a number is a validation error.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00", "rule_mask": "bogus" }],
+	"interface": [{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] }],
+	"route": [{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" }],
+	"strategy": [{ ".name": "solo", "use_route": ["wan_r"] }],
+	"rule": [
+		{ ".name": "a", "rule_id": "1", "proto": "tcp", "dest_port": "1", "use_strategy": "solo" },
+		{ ".name": "default_rule_v4", "dest_ip": "0.0.0.0/0", "use_strategy": "solo", "family": ["ipv4"] }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+
+let validation = m.validate_config();
+print('valid: ' + validation.valid + '\n');
+for (let e in validation.errors)
+	print('error ' + e.code + ' ' + e.section + ': ' + e.message + '\n');
+for (let w in validation.warnings)
+	print('warning ' + w.code + ' ' + (w.section ?? '-') + ': ' + w.message + '\n');
+
+let diagnostics = m.get_diagnostics({ section: 'connections' }).diagnostics.connections;
+print('diagnostics: mask=' + diagnostics.rule_mask + ' capacity=' + diagnostics.rule_capacity + ' errors=' + length(diagnostics.errors) + ' warnings=' + length(diagnostics.warnings) + '\n');
+-- End --
+
+-- Expect stdout --
+valid: false
+error invalidRuleMask globals: Rule mark mask 'bogus' is invalid.
+diagnostics: mask=bogus capacity=0 errors=1 warnings=0
+-- End --

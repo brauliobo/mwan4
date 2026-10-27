@@ -1,0 +1,58 @@
+Rule ids are persisted lazily, stay stable and repair missing, duplicate or invalid values.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] }],
+	"route": [{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" }],
+	"strategy": [{ ".name": "solo", "use_route": ["wan_r"] }],
+	"rule": [
+		{ ".name": "a", "rule_id": "3", "dest_port": "1", "use_strategy": "solo" },
+		{ ".name": "b", "dest_port": "2", "use_strategy": "solo" },
+		{ ".name": "c", "rule_id": "3", "dest_port": "3", "use_strategy": "solo" },
+		{ ".name": "d", "rule_id": "x", "dest_port": "4", "use_strategy": "solo" },
+		{ ".name": "e", "rule_id": "70", "dest_port": "5", "use_strategy": "solo" },
+		{ ".name": "default_rule_v4", "dest_ip": "0.0.0.0/0", "use_strategy": "solo", "family": ["ipv4"] }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.init();
+
+let fresh = () => { let c = require('uci').cursor(); c.load('mwan4'); return c; };
+let ids = c => {
+	let rules = [];
+	c.foreach('mwan4', 'rule', s => push(rules, s['.name'] + '=' + (s.rule_id ?? '-')));
+	return join(' ', rules);
+};
+
+print('capacity: ' + m.get_capabilities().connections.rule_capacity + ' mask: ' + m.get_capabilities().connections.rule_mask + '\n');
+print('before: ' + ids(fresh()) + '\n');
+
+m.ensure_rule_ids();
+print('assigned: ' + ids(fresh()) + '\n');
+
+let c = fresh();
+print('second pass changes: ' + m.assign_rule_ids(c) + '\n');
+
+// Reordering keeps ids; a deleted rule frees its id, a new rule takes the lowest free one.
+c.reorder('mwan4', 'e', 0);
+print('reordered changes: ' + m.assign_rule_ids(c) + ' -> ' + ids(c) + '\n');
+c.delete('mwan4', 'b');
+c.set('mwan4', 'z', 'rule');
+c.set('mwan4', 'z', 'use_strategy', 'solo');
+print('new rule changes: ' + m.assign_rule_ids(c) + ' -> ' + ids(c) + '\n');
+-- End --
+
+-- Expect stdout --
+capacity: 63 mask: 0x00fc0000
+before: a=3 b=- c=3 d=x e=70 default_rule_v4=-
+assigned: a=3 b=1 c=2 d=4 e=5 default_rule_v4=-
+second pass changes: 0
+reordered changes: 0 -> e=5 a=3 b=1 c=2 d=4 default_rule_v4=-
+new rule changes: 1 -> e=5 a=3 c=2 d=4 default_rule_v4=- z=1
+-- End --

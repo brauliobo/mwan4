@@ -1,0 +1,121 @@
+Diagnostics, counters, route explain and CLI text report the per-rule connection counts.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] },
+		{ ".name": "wan6", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv6"] },
+		{ ".name": "wanb", "enabled": "1", "id": "3", "table_id": "3", "mark": "0x300", "family": ["ipv4"] }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wan6_r", "interface": "wan6", "metric": "1", "weight": "1" },
+		{ ".name": "wanb_r", "interface": "wanb", "metric": "1", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "balanced", "use_route": ["wan_r", "wan6_r"] },
+		{ ".name": "backup", "use_route": ["wanb_r"] }
+	],
+	"rule": [
+		{ ".name": "https", "rule_id": "1", "dest_port": "443", "proto": "udp", "use_strategy": "balanced" },
+		{ ".name": "torrent", "rule_id": "2", "label": "BitTorrent", "use_strategy": "backup" },
+		{ ".name": "default_rule_v4", "dest_ip": "0.0.0.0/0", "use_strategy": "balanced", "family": ["ipv4"] },
+		{ ".name": "default_rule_v6", "dest_ip": "::/0", "use_strategy": "balanced", "family": ["ipv6"] }
+	]
+}
+-- End --
+
+-- File fs/open~_proc_net_nf_conntrack.txt --
+ipv4     2 tcp      6 7439 ESTABLISHED src=10.0.0.7 dst=205.237.105.139 sport=44602 dport=8080 packets=3571 bytes=3188052 src=205.237.105.139 dst=192.168.15.101 sport=8080 dport=44602 packets=3383 bytes=1407802 [ASSURED] mark=4278714630 zone=0 use=2
+ipv4     2 udp      17 98 src=10.0.0.11 dst=172.217.115.4 sport=16185 dport=443 packets=19 bytes=11093 src=172.217.115.4 dst=192.168.15.101 sport=443 dport=16185 packets=23 bytes=8261 [ASSURED] mark=4278452486 zone=0 use=2
+ipv4     2 tcp      6 3 CLOSE src=10.0.0.7 dst=205.237.105.139 sport=54490 dport=8080 packets=21 bytes=1394 src=205.237.105.139 dst=192.168.15.101 sport=8080 dport=54490 packets=20 bytes=3915 [ASSURED] mark=4278190342 zone=0 use=2
+ipv6     10 tcp      6 7437 ESTABLISHED src=fd00:0000:0000:0000:0000:0000:0000:0007 dst=2001:4860:4847:0400:0000:0000:0000:0000 sport=34230 dport=443 packets=79 bytes=57222 src=2001:4860:4847:0400:0000:0000:0000:0000 dst=2804:01b1:e000:a09f:62be:b4ff:fe1a:5cb4 sport=443 dport=34230 packets=83 bytes=26584 [ASSURED] mark=4278452742 zone=0 use=2
+ipv4     2 udp      17 9 src=10.0.0.7 dst=10.0.0.1 sport=42158 dport=53 packets=1 bytes=78 src=10.0.0.1 dst=10.0.0.7 sport=53 dport=42158 packets=1 bytes=142 mark=16128 zone=0 use=2
+ipv4     2 udp      17 6 src=10.0.0.11 dst=31.173.243.65 sport=20100 dport=60020 packets=1 bytes=143 [UNREPLIED] src=31.173.243.65 dst=192.168.15.101 sport=60020 dport=20100 packets=0 bytes=0 mark=4278715142 zone=0 use=2
+ipv4     2 icmp     1 20 src=192.168.1.2 dst=8.8.8.8 type=8 code=0 id=25562 packets=1 bytes=84 [UNREPLIED] src=8.8.8.8 dst=192.168.1.2 type=0 code=0 id=25562 packets=0 bytes=0 mark=4278190854 zone=0 use=2
+ipv4     2 tcp      6 299 ESTABLISHED src=10.0.0.7 dst=10.0.0.1 sport=58622 dport=22 packets=13 bytes=4318 src=10.0.0.1 dst=10.0.0.7 sport=22 dport=58622 packets=12 bytes=2882 [ASSURED] mark=4278190086 zone=0 use=2
+ipv6     10 udp      17 47 src=fd00:0000:0000:0000:0000:0000:0000:0011 dst=2601:03c8:427c:194e:ad26:c102:9e50:e030 sport=20100 dport=6881 packets=1 bytes=163 [UNREPLIED] src=2601:03c8:427c:194e:ad26:c102:9e50:e030 dst=2804:01b1:e000:a09f:62be:b4ff:fe1a:5cb4 sport=6881 dport=20100 packets=0 bytes=0 mark=4278190598 zone=0 use=2
+ipv4     2 tcp      6 100 ESTABLISHED src=10.0.0.9 dst=93.184.216.34 sport=40000 dport=80 packets=5 bytes=500 src=93.184.216.34 dst=192.168.15.101 sport=80 dport=40000 packets=4 bytes=900 [ASSURED] mark=4279501062 zone=0 use=2
+-- End --
+
+-- File fs/open~_proc_sys_net_netfilter_nf_conntrack_acct.txt --
+1
+-- End --
+
+-- File fs/popen~nft_list_counters_inet_fw4_2_dev_null.txt --
+table inet fw4 {
+	counter mwan4_counter_conn_https_ipv4 { packets 12 bytes 700 }
+	counter mwan4_counter_conn_https_ipv6 { packets 5 bytes 300 }
+	counter mwan4_counter_conn_torrent_ipv4 { packets 7 bytes 400 }
+	counter mwan4_counter_conn_default_rule_v4_ipv4 { packets 40 bytes 2000 }
+	counter mwan4_counter_rule_https_ipv4 { packets 900 bytes 90000 }
+}
+-- End --
+
+-- File ubus/network.interface.wan_4~status.json --
+{ "up": true }
+-- End --
+
+-- File ubus/network.interface.wan6_6~status.json --
+{ "up": true }
+-- End --
+
+-- File ubus/network.interface.wanb_4~status.json --
+{ "up": true }
+-- End --
+
+-- File fs/popen~nft_list_chain_inet_fw4_mwan4_rules_ipv4_2_dev_null.txt --
+table inet fw4 {
+	chain mwan4_rules_ipv4 {
+		meta l4proto udp udp dport { 443 } meta mark & 0x3f00 == 0x00000000 ct state new counter name "mwan4_counter_conn_https_ipv4"
+		meta l4proto udp udp dport { 443 } meta mark & 0x3f00 == 0x00000000 ct mark set ct mark & 0xff03ffff | 0x00040000
+		meta l4proto udp udp dport { 443 } meta mark & 0x3f00 == 0x00000000 counter name "mwan4_counter_rule_https_ipv4" jump mwan4_strategy_balanced_ipv4 comment "https"
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0x00000000 counter name "mwan4_counter_rule_default_rule_v4_ipv4" jump mwan4_strategy_balanced_ipv4 comment "default_rule_v4"
+	}
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+
+let show = (title, data) => print(title + ' ' + replace(sprintf('%.J', data), /\s*\n\s*/g, ' ') + '\n');
+
+let d = m.get_diagnostics({ section: 'connections' }).diagnostics.connections;
+show('connections', { accounting: d.accounting, rule_mask: d.rule_mask, rule_capacity: d.rule_capacity, total: d.total, errors: d.errors, warnings: d.warnings });
+show('interfaces', d.interfaces);
+show('strategies', d.strategies);
+show('rule ids', map(keys(d.rules), name => name + '=' + d.rules[name].id));
+
+let counters = m.get_diagnostics({ section: 'counters' }).diagnostics.counters;
+show('counter summary', counters.summary);
+show('https group', { new: counters.groups.rules.https.new_connections, active: counters.groups.rules.https.active_connections, families: keys(counters.groups.rules.https.families) });
+show('torrent group', counters.groups.rules.torrent?.active_connections);
+
+let explain = m.get_diagnostics({ section: 'explain', family: 'ipv4', proto: 'udp', dest_port: '443' }).diagnostics.explain;
+for (let r in explain.rules)
+	print('explain ' + r.rule + ': id=' + r.rule_id + ' new=' + r.new_connections.total + ' active=' + r.active_connections.total + '\n');
+
+print('summary mask: ' + m.get_diagnostics({ section: 'summary' }).diagnostics.summary.rule_mask + '\n');
+for (let line in m.report_rules('ipv4'))
+	print(line + '\n');
+-- End --
+
+-- Expect stdout --
+connections { "accounting": true, "rule_mask": "0x00fc0000", "rule_capacity": 63, "total": { "ipv4": 7, "ipv6": 2, "total": 9 }, "errors": [ ], "warnings": [ ] }
+interfaces { "wan": { "ipv4": 4, "ipv6": 0, "total": 4 }, "wan6": { "ipv4": 0, "ipv6": 2, "total": 2 }, "wanb": { "ipv4": 2, "ipv6": 0, "total": 2 } }
+strategies { "balanced": { "ipv4": 5, "ipv6": 2, "total": 7 }, "backup": { "ipv4": 2, "ipv6": 0, "total": 2 } }
+rule ids [ "https=1", "torrent=2", "default_rule_v4=0", "default_rule_v6=0" ]
+counter summary { "total": 5, "packets": 900, "bytes": 90000, "interfaces": 0, "strategies": 0, "rules": 1, "connections": 4, "other": 0, "referenced": 0, "unreferenced": 5, "missing_references": 0 }
+https group { "new": { "ipv4": 12, "ipv6": 5, "total": 17 }, "active": { "ipv4": 1, "ipv6": 1, "total": 2 }, "families": [ "ipv4" ] }
+torrent group { "ipv4": 2, "ipv6": 0, "total": 2 }
+explain https: id=1 new=17 active=2
+explain torrent: id=2 new=7 active=2
+explain default_rule_v4: id=0 new=40 active=4
+explain default_rule_v6: id=0 new=0 active=1
+summary mask: 0x00fc0000
+meta l4proto udp udp dport { 443 }  [https id 1: 1 active, 12 new connections]
+ip daddr 0.0.0.0/0  [default_rule_v4 id 0: 4 active, 40 new connections]
+-- End --

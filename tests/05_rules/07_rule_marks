@@ -1,0 +1,65 @@
+Rules record their id in a custom, non-contiguous rule_mask with constant ct mark operations; catch-alls clear the rule bits and stay last.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00", "rule_mask": "0x00A50000" }],
+	"interface": [{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] }],
+	"route": [{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" }],
+	"strategy": [{ ".name": "solo", "use_route": ["wan_r"] }],
+	"rule": [
+		{ ".name": "first", "rule_id": "1", "dest_port": "1", "proto": "tcp", "use_strategy": "solo", "family": ["ipv4"] },
+		{ ".name": "default_rule_v4", "dest_ip": "0.0.0.0/0", "use_strategy": "solo", "family": ["ipv4"] },
+		{ ".name": "sticky5", "rule_id": "5", "sticky": "1", "dest_port": "5", "proto": "tcp", "use_strategy": "solo", "family": ["ipv4"], "local": "1" },
+		{ ".name": "last15", "rule_id": "15", "dest_port": "15", "proto": "udp", "use_strategy": "default", "family": ["ipv4"] }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+m.update_iface_to_table();
+m.nft_file('create', 'rules');
+m.set_user_rules();
+m.nft_file('install', 'rules');
+let nft = global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/11-mwan4-rules.nft');
+
+let chain_lines = name => {
+	let out = [], inside = false;
+	for (let l in split(nft, '\n')) {
+		if (l == '\tchain ' + name + ' {') inside = true;
+		else if (inside && l == '\t}') break;
+		else if (inside) push(out, l);
+	}
+	return out;
+};
+
+for (let chain in ['mwan4_rules_ipv4', 'mwan4_rules_out_ipv4'])
+	print(chain + ':\n' + join('\n', chain_lines(chain)) + '\n');
+print('copies meta mark into ct mark: ' + (index(nft, 'ct mark set meta mark') >= 0) + '\n');
+-- End --
+
+-- Expect stdout --
+mwan4_rules_ipv4:
+		meta l4proto tcp tcp dport { 1 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_first_ipv4
+		meta l4proto tcp tcp dport { 1 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff5affff | 0x10000
+		meta l4proto tcp tcp dport { 1 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_first_ipv4 jump mwan4_strategy_solo_ipv4 comment "first"
+		meta l4proto tcp tcp dport { 5 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_sticky5_ipv4
+		meta l4proto tcp tcp dport { 5 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff5affff | 0x210000
+		meta l4proto tcp tcp dport { 5 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_sticky5_ipv4 jump mwan4_rule_sticky5_ipv4 comment "sticky5"
+		meta l4proto udp udp dport { 15 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_last15_ipv4
+		meta l4proto udp udp dport { 15 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff5affff | 0xa50000
+		meta l4proto udp udp dport { 15 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_last15_ipv4 meta mark set 0x3f00 comment "last15"
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_default_rule_v4_ipv4
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff5affff
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_default_rule_v4_ipv4 jump mwan4_strategy_solo_ipv4 comment "default_rule_v4"
+mwan4_rules_out_ipv4:
+		meta l4proto tcp tcp dport { 5 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_sticky5_ipv4
+		meta l4proto tcp tcp dport { 5 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff5affff | 0x210000
+		meta l4proto tcp tcp dport { 5 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_sticky5_ipv4 jump mwan4_rule_sticky5_ipv4 comment "sticky5"
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_default_rule_v4_ipv4
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff5affff
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_default_rule_v4_ipv4 jump mwan4_strategy_solo_ipv4 comment "default_rule_v4"
+copies meta mark into ct mark: false
+-- End --

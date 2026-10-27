@@ -7,6 +7,7 @@ import { readfile, writefile, popen, stat, unlink } from 'fs';
 import { cursor } from 'uci';
 import package_ctl from 'packages';
 import dnsmasq from 'dnsmasq';
+import connections from 'connections';
 
 // Forward declarations — defined later but referenced by the export block.
 // ucode does not hoist function declarations.
@@ -20,6 +21,12 @@ const STATUS_DIR = '/var/run/mwan4';
 const STATUS_NFT_LOG_DIR = STATUS_DIR + '/nft_log';
 const TRACK_STATUS_DIR = '/var/run/mwan4track';
 const CONNTRACK_FILE = '/proc/net/nf_conntrack';
+const CONNTRACK_ACCT_FILE = '/proc/sys/net/netfilter/nf_conntrack_acct';
+const CONNTRACK_CACHE_TTL = 2;
+// Bits 18-23 of the PBR range: pbr never touches conntrack marks, and no other default mark layout leaves bits free.
+const DEFAULT_RULE_MASK = '0x00fc0000';
+const CONNECTIONS_DEFAULT_LIMIT = 200;
+const CONNECTIONS_MAX_LIMIT = 1000;
 const DEFAULT_LOWEST_METRIC = 256;
 const MPTCP_STATE_FILE = STATUS_DIR + '/mptcp.endpoints';
 
@@ -38,8 +45,8 @@ const TUNNEL_DIAGNOSTIC_ACTION = 'Review tunnel underlay_strategy and route refe
 const TUNNEL_DIAGNOSTIC_CHECK = 'Review Diagnostics > Tunnels and keep tunnel underlay strategies on physical WAN routes.';
 
 const CONTRACT_VERSION = 2;
-const STATUS_SECTIONS = ['interfaces', 'connected', 'strategies', 'diagnostics', 'counters', 'tunnels'];
-const DIAGNOSTIC_SECTIONS = ['all', 'summary', 'interfaces', 'routes', 'rules', 'strategies', 'nftables', 'service', 'tunnels', 'counters', 'ownership', 'pbr', 'mptcp', 'quality', 'probes', 'vrf', 'explain', 'packages'];
+const STATUS_SECTIONS = ['interfaces', 'connected', 'strategies', 'rules', 'diagnostics', 'counters', 'tunnels'];
+const DIAGNOSTIC_SECTIONS = ['all', 'summary', 'interfaces', 'routes', 'rules', 'connections', 'strategies', 'nftables', 'service', 'tunnels', 'counters', 'ownership', 'pbr', 'mptcp', 'quality', 'probes', 'vrf', 'explain', 'packages'];
 const RUNTIME_CONTROL_ACTIONS = ['ifup', 'ifdown', 'start', 'stop', 'restart', 'reload', 'reset_counters'];
 const ADVANCED_CONTROL_ACTIONS = ['install_feature', 'wireguard_keygen', 'apply_tunnel_exemptions', 'apply_bfd'];
 const CONTROL_ACTIONS = ['ifup', 'ifdown', 'start', 'stop', 'restart', 'reload', 'reset_counters', 'install_feature', 'wireguard_keygen', 'apply_tunnel_exemptions', 'apply_bfd'];
@@ -177,6 +184,7 @@ let mwan4 = {
 	scriptname: 'mwan4',
 	no_ipv6: 1,
 	mmx_mask: '', mmx_default: '', mmx_blackhole: '', mmx_unreachable: '',
+	rule_mask: '', rule_mask_n: 0, rule_mask_inv: '',
 	iface_max: 0,
 	iface_tbl: {}, iface_table_tbl: {}, iface_mark_tbl: {}, dev_tbl: { ipv4: {}, ipv6: {} },
 	source_routing: false,
@@ -984,6 +992,60 @@ function ordered_rules() {
 	return [...filter(rules, s => !DEFAULT_RULES[s['.name']]), ...filter(rules, s => DEFAULT_RULES[s['.name']])];
 }
 
+// ── Rule IDs ─────────────────────────────────────────────────────────
+
+// Id 0 is reserved for connections without rule bits (the catch-alls).
+function rule_capacity() {
+	return (1 << count_one_bits(mwan4.rule_mask_n)) - 1;
+}
+
+function valid_rule_id(value) {
+	let id = parse_uint_number(value);
+	return (id != null && id >= 1 && id <= rule_capacity()) ? id : 0;
+}
+
+function user_rule_sections(c) {
+	let sections = [];
+	c.foreach('mwan4', 'rule', s => push(sections, s));
+	return filter(sections, s => !DEFAULT_RULES[s['.name']]);
+}
+
+function lowest_free_rule_id(used) {
+	for (let id = 1; id <= rule_capacity(); id++)
+		if (!used[id]) return id;
+	return 0;
+}
+
+// Give every user rule without a valid, unique rule_id the lowest free one. Ids are
+// never reassigned while the section exists, so reordering or deleting other rules keeps them.
+// Returns the number of changed sections; the caller saves and commits.
+function assign_rule_ids(c) {
+	_ensure_init();
+	let used = {}, pending = [];
+	for (let s in user_rule_sections(c)) {
+		let id = valid_rule_id(s.rule_id);
+		if (id && !used[id]) used[id] = true;
+		else push(pending, s['.name']);
+	}
+
+	let changed = 0;
+	for (let name in pending) {
+		let id = lowest_free_rule_id(used);
+		if (!id) break;
+		used[id] = true;
+		c.set('mwan4', name, 'rule_id', '' + id);
+		changed++;
+	}
+	return changed;
+}
+
+function ensure_rule_ids() {
+	_ensure_init();
+	if (!assign_rule_ids(uci_ctx)) return;
+	uci_ctx.save('mwan4');
+	uci_ctx.commit('mwan4');
+}
+
 // ── Lazy Initialization ──────────────────────────────────────────────
 
 _ensure_init = function() {
@@ -1016,6 +1078,12 @@ _ensure_init = function() {
 	mwan4.mmx_unreachable = id2mask(mm_unreachable, mwan4.mmx_mask);
 
 	mwan4.source_routing = uci_get_bool_alias('globals', 'source_routing', 'mwan4.source_routing', false);
+
+	// An invalid or overlapping rule_mask disables rule bits (validate reports it).
+	mwan4.rule_mask = lc(uci_get_alias('globals', 'rule_mask', 'mwan4.rule_mask', DEFAULT_RULE_MASK));
+	let rule_mask = parse_mark_number(mwan4.rule_mask);
+	mwan4.rule_mask_n = (rule_mask > 0 && rule_mask <= 0xffffffff && !(rule_mask & +mwan4.mmx_mask)) ? rule_mask : 0;
+	mwan4.rule_mask_inv = sprintf('0x%08x', 0xffffffff & ~mwan4.rule_mask_n);
 };
 
 function load() {
@@ -2441,6 +2509,7 @@ function _build_user_rule(s, family_flag) { // ucode-lsp disable
 
 	return {
 		rule, family_flag, match_str: join(' ', parts), mark_action: mark.action,
+		rule_id: DEFAULT_RULES[rule] ? 0 : valid_rule_id(s.rule_id),
 		is_strategy_jump: !!mark.jump, sticky, timeout, use_strategy, ipset,
 		domains: map(domains, d => lc(d)), domain_set,
 		local: DEFAULT_RULES[rule] || uci_bool(s.local),
@@ -2517,6 +2586,13 @@ function sticky_chain_lines(rd, fam) {
 	];
 }
 
+// Record the matching rule in the conntrack mark with constant same-register ops,
+// leaving the WAN bits and every other owner's bits untouched. Id 0 clears the rule bits.
+function rule_ct_mark_action(rule_id) {
+	let bits = rule_id ? ' | ' + id2mask(rule_id, mwan4.rule_mask_n) : '';
+	return sprintf('ct mark set ct mark & %s%s', mwan4.rule_mask_inv, bits);
+}
+
 function rule_chain_lines(chain, rules) {
 	let lines = [sprintf('\tchain %s {', chain)];
 	for (let rd in rules) {
@@ -2524,6 +2600,10 @@ function rule_chain_lines(chain, rules) {
 
 		if (rd.global_logging && rd.rule_logging)
 			push(lines, sprintf('\t\t%s log prefix "MWAN4(%s) " comment "%s"', prefix, rd.rule, rd.rule));
+
+		push(lines, sprintf('\t\t%s ct state new %s', prefix, nft_counter_use(rd.conn_counter)));
+		if (mwan4.rule_mask_n)
+			push(lines, sprintf('\t\t%s %s', prefix, rule_ct_mark_action(rd.rule_id)));
 
 		let action = rd.has_sticky ? sprintf('jump %s_rule_%s_%s', NFT_PREFIX, rd.rule, rd.family_flag) : rd.mark_action;
 		push(lines, sprintf('\t\t%s %s %s comment "%s"', prefix, nft_counter_use(rd.counter), action, rd.rule));
@@ -2548,8 +2628,10 @@ function set_user_rules(rule_data) {
 	let counter_defs = [];
 	let counter_seen = {};
 	for (let fam in ['ipv4', 'ipv6'])
-		for (let rd in rule_data[fam])
+		for (let rd in rule_data[fam]) {
 			rd.counter = nft_add_counter(counter_defs, counter_seen, 'rule', rd.rule, fam);
+			rd.conn_counter = nft_add_counter(counter_defs, counter_seen, 'conn', rd.rule, fam);
+		}
 	push(L, ...counter_defs);
 
 	for (let fam in ['ipv4', 'ipv6'])
@@ -2724,6 +2806,208 @@ function delete_iface_rules(iface) {
 
 // ── Reporting ────────────────────────────────────────────────────────
 
+function parse_nft_counters(out) {
+	let result  = {};
+	let current = null;
+
+	for (let line in split(out || '', '\n')) {
+		line = trim(line);
+
+		let inline = match(line, /^counter ([A-Za-z0-9_]+) \{ packets ([0-9]+) bytes ([0-9]+) \}$/);
+		if (inline) {
+			result[inline[1]] = {
+				packets: int(inline[2]),
+				bytes:   int(inline[3]),
+			};
+			current = null;
+			continue;
+		}
+
+		let start = match(line, /^counter ([A-Za-z0-9_]+) \{/);
+		if (start) {
+			current = start[1];
+			result[current] = {
+				packets: 0,
+				bytes:   0,
+			};
+			continue;
+		}
+
+		if (!current) continue;
+
+		let stats = match(line, /^packets ([0-9]+) bytes ([0-9]+)/);
+		if (stats) {
+			result[current].packets = int(stats[1]);
+			result[current].bytes = int(stats[2]);
+			continue;
+		}
+
+		if (index(line, '}') >= 0)
+			current = null;
+	}
+
+	return result;
+}
+
+function report_counters() {
+	let out = nft_output(sprintf('list counters inet %s 2>/dev/null', NFT_TABLE));
+	return parse_nft_counters(out);
+}
+
+// ── Connections ──────────────────────────────────────────────────────
+
+let conntrack_cache = { time: 0, counts: null };
+
+function connection_layout() {
+	return { wan_mask: parse_mark_number(mwan4.mmx_mask), rule_mask: mwan4.rule_mask_n };
+}
+
+// One conntrack pass serves every status poll within the cache TTL.
+function connection_counts() {
+	if (!conntrack_cache.counts || time() - conntrack_cache.time >= CONNTRACK_CACHE_TTL)
+		conntrack_cache = { time: time(), counts: connections.scan(readfile(CONNTRACK_FILE) || '', connection_layout()).counts };
+	return conntrack_cache.counts;
+}
+
+function conntrack_accounting() {
+	return read_str(CONNTRACK_ACCT_FILE) == '1';
+}
+
+function sum(numbers) {
+	let total = 0;
+	for (let n in numbers) total += n;
+	return total;
+}
+
+function sum_counts(a, b) {
+	return connections.family_counts(a.ipv4 + b.ipv4, a.ipv6 + b.ipv6);
+}
+
+// Every rule section in priority order; the catch-alls have id 0 and share the unmarked bucket.
+function rule_records() {
+	return map(ordered_rules(), s => {
+		let catch_all = !!DEFAULT_RULES[s['.name']];
+		return {
+			name: s['.name'], label: s.label || s['.name'], enabled: rule_enabled(s), strategy: s.use_strategy || '',
+			id: catch_all ? 0 : valid_rule_id(s.rule_id), catch_all,
+			families: length(as_list(s.family)) ? as_list(s.family) : ['ipv4', 'ipv6'],
+		};
+	});
+}
+
+// Connections of ids no rule owns (a deleted rule, rule bits from before an upgrade) belong to the catch-alls.
+function rules_active(recs, counts) {
+	let owned = uniq(map(filter(recs, rec => rec.id), rec => rec.id));
+	let in_rules = family => sum(map(owned, id => counts.rules['' + id]?.[family] ?? 0));
+	let pick = (rec, family) => rec.catch_all
+		? (index(rec.families, family) >= 0 ? counts.total[family] - in_rules(family) : 0)
+		: (rec.id ? counts.rules['' + rec.id]?.[family] ?? 0 : 0);
+
+	let result = {};
+	for (let rec in recs)
+		result[rec.name] = connections.family_counts(pick(rec, 'ipv4'), pick(rec, 'ipv6'));
+	return result;
+}
+
+function active_by_rule() {
+	return rules_active(rule_records(), connection_counts());
+}
+
+function rule_new_connections(rec, counters) {
+	let pick = family => counters[nft_counter_name('conn', rec.name, family)]?.packets ?? 0;
+	return connections.family_counts(pick('ipv4'), pick('ipv6'));
+}
+
+function interface_active(iface) {
+	return connection_counts().wans['' + parse_mark_number(get_iface_mark(iface))] ?? connections.family_counts();
+}
+
+function interfaces_active() {
+	let result = {};
+	uci_foreach('interface', function(s) {
+		result[s['.name']] = interface_active(s['.name']);
+	});
+	return result;
+}
+
+function strategies_active() {
+	let active = active_by_rule(), result = {};
+	for (let rec in filter(rule_records(), rec => rec.strategy))
+		result[rec.strategy] = sum_counts(result[rec.strategy] ?? connections.family_counts(), active[rec.name]);
+	return result;
+}
+
+function get_status_rules() {
+	let active = active_by_rule(), counters = report_counters(), result = {};
+	for (let rec in rule_records())
+		result[rec.name] = {
+			id: rec.id, label: rec.label, enabled: rec.enabled, strategy: rec.strategy,
+			new_connections: rule_new_connections(rec, counters), active_connections: active[rec.name],
+		};
+	return result;
+}
+
+function wan_names() {
+	let names = {};
+	for (let name, mark in { default: mwan4.mmx_default, blackhole: mwan4.mmx_blackhole, unreachable: mwan4.mmx_unreachable })
+		names['' + parse_mark_number(mark)] = name;
+	uci_foreach('interface', function(s) {
+		names['' + parse_mark_number(get_iface_mark(s['.name']))] = s['.name'];
+	});
+	return names;
+}
+
+// Rule of a connection: the record owning its rule id, else the catch-all of its family.
+function rule_resolver() {
+	let by_id = {}, catch_all = {};
+	for (let rec in rule_records()) {
+		if (!rec.catch_all) by_id['' + rec.id] ??= rec;
+		else for (let family in rec.families) catch_all[family] ??= rec;
+	}
+	return (family, id) => by_id['' + id] ?? catch_all[family];
+}
+
+function connection_item(entry, resolve, names) {
+	let rec = resolve(entry.family, entry.rule_id);
+	let own = rec && !rec.catch_all;
+	return {
+		family: entry.family, proto: entry.proto, src: entry.src, sport: entry.sport, dst: entry.dst, dport: entry.dport,
+		state: entry.state, timeout: entry.timeout, packets: entry.packets, bytes: entry.bytes,
+		rule: own ? rec.name : '', rule_label: own ? rec.label : '',
+		interface: names['' + entry.wan] ?? sprintf('0x%x', entry.wan), strategy: rec?.strategy ?? '',
+	};
+}
+
+function connection_matches_text(item, text) {
+	let fields = [item.family, item.proto, item.src, item.dst, item.state, item.rule, item.rule_label, item.interface, item.strategy,
+		item.sport, item.dport, item.src + ':' + item.sport, item.dst + ':' + item.dport];
+	return index(lc(join(' ', fields)), lc(text)) >= 0;
+}
+
+// Most traffic first (bytes when conntrack accounting is on), then the longest remaining timeout.
+function get_connections(args) {
+	_ensure_init();
+	args = args || {};
+
+	let limit = min(max(int(args.limit) || CONNECTIONS_DEFAULT_LIMIT, 1), CONNECTIONS_MAX_LIMIT);
+	let offset = max(int(args.offset) || 0, 0);
+	let resolve = rule_resolver(), names = wan_names();
+	let want = (family, id, wan) => {
+		let rec = resolve(family, id);
+		return (!args.family || args.family == family) && (!args.interface || names['' + wan] == args.interface)
+			&& (!args.rule || rec?.name == args.rule) && (!args.strategy || rec?.strategy == args.strategy);
+	};
+
+	let items = map(connections.scan(readfile(CONNTRACK_FILE) || '', connection_layout(), want).entries, e => connection_item(e, resolve, names));
+	items = filter(items, item => (!args.proto || lc(args.proto) == item.proto) && (!args.search || connection_matches_text(item, args.search)));
+	sort(items, (a, b) => b.bytes - a.bytes || b.timeout - a.timeout);
+
+	return {
+		ok: true, total: length(items), truncated: length(items) > offset + limit,
+		accounting: conntrack_accounting(), items: slice(items, offset, offset + limit),
+	};
+}
+
 function report_iface_status() {
 	let result = [];
 	uci_foreach('interface', function(s) {
@@ -2769,7 +3053,7 @@ function report_iface_status() {
 				msg = sprintf(' interface %s (%s) is %s and tracking is %s (%s)', iface, family, iface_st, tracking, detail);
 			else
 				msg = sprintf(' interface %s (%s) is %s and tracking is %s', iface, family, iface_st, tracking);
-			push(result, msg);
+			push(result, sprintf('%s, %d active connections', msg, interface_active(iface)[family]));
 		});
 	});
 	return result;
@@ -2829,6 +3113,7 @@ function parse_strategy_chain(strategy, family_suffix, chain_out) {
 
 function get_strategy_status(family_suffix) {
 	let result = {};
+	let active = strategies_active();
 
 	uci_foreach('strategy', function(s) {
 		let strategy = s['.name'];
@@ -2837,6 +3122,7 @@ function get_strategy_status(family_suffix) {
 		let chain_name = sprintf('%s_strategy_%s_%s', NFT_PREFIX, strategy, family_suffix);
 		let chain_out = nft_output(sprintf('list chain inet %s %s 2>/dev/null', NFT_TABLE, chain_name));
 		result[strategy] = parse_strategy_chain(strategy, family_suffix, chain_out);
+		result[strategy].active_connections = (active[strategy] ?? connections.family_counts())[family_suffix];
 	});
 
 	return result;
@@ -2881,8 +3167,9 @@ function get_status_strategies(family_suffix) {
 function report_strategies(family_suffix) {
 	let result = [];
 	let strategies = get_strategies_data(family_suffix);
+	let active = strategies_active();
 	for (let name in keys(strategies)) {
-		push(result, name + ':');
+		push(result, sprintf('%s: (%d active connections)', name, (active[name] ?? connections.family_counts())[family_suffix]));
 		let entries = strategies[name];
 		let total = length(entries) ? entries[0].total : 0;
 		if (total > 0) {
@@ -2915,13 +3202,17 @@ function report_connected(family) {
 function report_rules(family) {
 	let chain = sprintf('%s_rules_%s', NFT_PREFIX, family);
 	let out = nft_output(sprintf('list chain inet %s %s 2>/dev/null', NFT_TABLE, chain));
+	let stats = get_status_rules();
 	let result = [];
 	for (let line in split(out, '\n')) {
-		if (!match(line, /comment/)) continue;
+		let name = match(line, /comment "([^"]+)"/)?.[1];
+		if (!name) continue;
+		let rule = stats[name];
 		line = replace(line, /meta mark.*/, '');
 		line = replace(line, NFT_PREFIX + '_strategy_', '- ');
 		line = replace(line, NFT_PREFIX + '_rule_', 'S ');
-		push(result, trim(line));
+		push(result, sprintf('%s  [%s id %d: %d active, %d new connections]', trim(line), name, rule?.id ?? 0,
+			rule?.active_connections[family] ?? 0, rule?.new_connections[family] ?? 0));
 	}
 	return result;
 }
@@ -2952,49 +3243,6 @@ function report_tunnels() {
 
 	for (let warning in status.warnings)
 		push(result, sprintf('Warning: %s: %s', warning.code, warning.message));
-
-	return result;
-}
-
-function parse_nft_counters(out) {
-	let result  = {};
-	let current = null;
-
-	for (let line in split(out || '', '\n')) {
-		line = trim(line);
-
-		let inline = match(line, /^counter ([A-Za-z0-9_]+) \{ packets ([0-9]+) bytes ([0-9]+) \}$/);
-		if (inline) {
-			result[inline[1]] = {
-				packets: int(inline[2]),
-				bytes:   int(inline[3]),
-			};
-			current = null;
-			continue;
-		}
-
-		let start = match(line, /^counter ([A-Za-z0-9_]+) \{/);
-		if (start) {
-			current = start[1];
-			result[current] = {
-				packets: 0,
-				bytes:   0,
-			};
-			continue;
-		}
-
-		if (!current) continue;
-
-		let stats = match(line, /^packets ([0-9]+) bytes ([0-9]+)/);
-		if (stats) {
-			result[current].packets = int(stats[1]);
-			result[current].bytes = int(stats[2]);
-			continue;
-		}
-
-		if (index(line, '}') >= 0)
-			current = null;
-	}
 
 	return result;
 }
@@ -3032,25 +3280,28 @@ function parse_nft_counter_references(out) {
 	return result;
 }
 
-function report_counters() {
-	let out = nft_output(sprintf('list counters inet %s 2>/dev/null', NFT_TABLE));
-	return parse_nft_counters(out);
-}
-
 function summarize_counters(counters) {
 	let summary = {
-		'total':      0,
-		'packets':    0,
-		'bytes':      0,
-		'interfaces': 0,
-		'strategies': 0,
-		'rules':      0,
-		'other':      0,
+		'total':       0,
+		'packets':     0,
+		'bytes':       0,
+		'interfaces':  0,
+		'strategies':  0,
+		'rules':       0,
+		'connections': 0,
+		'other':       0,
 	};
 
 	for (let name in keys(counters || {})) {
 		let counter = counters[name] || {};
 		summary.total++;
+
+		// New-connection counters count connections, not traffic.
+		if (index(name, NFT_PREFIX + '_counter_conn_') == 0) {
+			summary.connections++;
+			continue;
+		}
+
 		summary.packets += int(counter.packets || 0);
 		summary.bytes += int(counter.bytes || 0);
 
@@ -3102,7 +3353,7 @@ function parse_counter_identity(name) {
 		return { 'kind': 'other', 'name': name };
 
 	let tail = substr(name, length(prefix));
-	let kind = match(tail, /^(iface|strategy|rule)_(.+)$/);
+	let kind = match(tail, /^(iface|strategy|rule|conn)_(.+)$/);
 	if (!kind)
 		return { 'kind': 'other', 'name': name };
 
@@ -3141,8 +3392,9 @@ function parse_counter_identity(name) {
 		};
 	}
 	case 'rule':
+	case 'conn':
 		return {
-			'kind':   'rule',
+			'kind':   kind[1] == 'rule' ? 'rule' : 'connection',
 			'rule':   join_parts(parts, 0, family_pos),
 			'family': family,
 			'name':   name,
@@ -3207,6 +3459,12 @@ function group_counters(counters) {
 			family.items[name] = counter;
 			counter_summary_add(entity.summary, counter);
 			counter_summary_add(family.summary, counter);
+			break;
+		case 'connection':
+			entity = ensure_counter_entity(groups.rules, parsed.rule);
+			entity.new_connections = connections.family_counts(
+				entity.new_connections?.ipv4 + (parsed.family == 'ipv4' ? counter.packets : 0),
+				entity.new_connections?.ipv6 + (parsed.family == 'ipv6' ? counter.packets : 0));
 			break;
 		default:
 			groups.other.items[name] = counter;
@@ -3366,6 +3624,7 @@ function get_interfaces_status(args, procd) {
 			'failure_loss':    int(intf.failure_loss || '50'),
 			'recovery_latency': int(intf.recovery_latency || '500'),
 			'recovery_loss':   int(intf.recovery_loss || '10'),
+			'active_connections': interface_active(ifname),
 		};
 
 		let tunnel = get_tunnel_metadata(intf);
@@ -3586,6 +3845,10 @@ function get_status(args) {
 				'ipv6': get_strategy_status('ipv6'),
 			},
 		};
+	case 'rules':
+		return {
+			'rules': get_status_rules(),
+		};
 	case 'interfaces':
 		procd = get_service_instances();
 		return {
@@ -3622,6 +3885,7 @@ function get_status(args) {
 				'ipv4': get_strategy_status('ipv4'),
 				'ipv6': get_strategy_status('ipv6'),
 			},
+			'rules':       get_status_rules(),
 			'tunnels':     get_tunnel_status(),
 			'diagnostics': get_status_diagnostics({ 'service_instances': procd }),
 		};
@@ -3840,6 +4104,13 @@ function get_capabilities() {
 		'domains': {
 			'dnsmasq_nftset': dnsmasq.nftset_supported(),
 		},
+		'connections': {
+			'rule_mask':     mwan4.rule_mask,
+			'rule_capacity': rule_capacity(),
+			'limit_default': CONNECTIONS_DEFAULT_LIMIT,
+			'limit_max':     CONNECTIONS_MAX_LIMIT,
+			'filters':       ['rule', 'interface', 'strategy', 'family', 'proto', 'search'],
+		},
 	};
 }
 
@@ -3917,6 +4188,56 @@ function validate_rule(s, strategies, builtin_strategies, report) {
 	validate_rule_ports(s, proto, report);
 	validate_rule_addresses(s, report);
 	validate_rule_matches(s, report);
+}
+
+// rule_mask and rule id health, shared by validate and diagnostics.
+function external_uci_section(config, section) {
+	let c = cursor();
+	c.load(config);
+	return c.get_all(config, section) ?? {};
+}
+
+function external_mark_masks() {
+	let masks = {};
+	let pbr = external_uci_section('pbr', 'config');
+	let tomato = external_uci_section('tomato-qos', 'main');
+	if (uci_bool(pbr.enabled))
+		masks.pbr = parse_hex_int(pbr.fw_mask || '00ff0000');
+	if (uci_bool(tomato.enabled))
+		masks['tomato-qos'] = parse_mark_number(tomato.qos_mark_mask || '0xff') | parse_mark_number(tomato.dpi_state_mask || '0xc000')
+			| parse_mark_number(tomato.rule_mark_mask || '0xff000000');
+	return masks;
+}
+
+function validate_rule_mask(report) {
+	let mask = parse_mark_number(mwan4.rule_mask);
+	if (!(mask > 0 && mask <= 0xffffffff))
+		return report.error('invalidRuleMask', 'globals', sprintf("Rule mark mask '%s' is invalid.", mwan4.rule_mask));
+	if (mask & +mwan4.mmx_mask)
+		return report.error('ruleMaskOverlap', 'globals', sprintf('Rule mark mask %s overlaps mmx_mask %s.', mwan4.rule_mask, mwan4.mmx_mask));
+	for (let owner, owned in external_mark_masks())
+		if (mask & owned)
+			report.warning('ruleMaskSharedMarks', 'globals', sprintf('Rule mark mask %s overlaps %s marks %s; set a rule_mask they do not use.', mwan4.rule_mask, owner, sprintf('0x%08x', owned)));
+}
+
+function validate_rule_ids(report) {
+	validate_rule_mask(report);
+	if (!mwan4.rule_mask_n) return;
+
+	let used = {};
+	let sections = user_rule_sections(uci_ctx);
+	for (let s in sections) {
+		let id = valid_rule_id(s.rule_id);
+		if (s.rule_id != null && !id)
+			report.warning('invalidRuleId', s['.name'], sprintf("Rule '%s' has invalid rule_id '%s'; a new one is assigned on the next reload.", s['.name'], s.rule_id));
+		else if (id && used[id])
+			report.warning('duplicateRuleId', s['.name'], sprintf("Rule '%s' duplicates rule_id %d used by '%s'; a new one is assigned on the next reload.", s['.name'], id, used[id]));
+		else if (id)
+			used[id] = s['.name'];
+	}
+
+	if (length(sections) > rule_capacity())
+		report.warning('ruleIdCapacity', null, sprintf('%d rules but rule_mask %s holds only %d rule ids; the others are not tracked per rule.', length(sections), mwan4.rule_mask, rule_capacity()));
 }
 
 function validate_config() {
@@ -4084,6 +4405,8 @@ function validate_config() {
 		counts.rules++;
 	});
 
+	validate_rule_ids({ error: validation_error, warning: validation_warning });
+
 	if (!dnsmasq.nftset_supported() && length(filter(ordered_rules(), s => rule_enabled(s) && length(as_list(s.domain)))))
 		validation_warning('dnsmasqNftsetMissing', null, 'Domain rules need dnsmasq-full with nftset support.');
 
@@ -4133,6 +4456,7 @@ function diagnostics_summary() {
 		'version':            CONTRACT_VERSION,
 		'mmx_mask':           mwan4.mmx_mask,
 		'mmx_default':        mwan4.mmx_default,
+		'rule_mask':          mwan4.rule_mask,
 		'no_ipv6':            mwan4.no_ipv6 == 1,
 		'source_routing':     mwan4.source_routing,
 		'interfaces':         get_configured_interfaces(),
@@ -4140,6 +4464,26 @@ function diagnostics_summary() {
 		'strategies':         get_strategies(),
 		'tunnels':            get_tunnel_status(),
 		'status':             get_status_diagnostics({ 'service_instances': service_instances }),
+	};
+}
+
+function diagnostics_connections() {
+	_ensure_init();
+	let report = { errors: [], warnings: [] };
+	validate_rule_ids({
+		error:   (code, section, message) => push(report.errors, contract_problem(code, section, message)),
+		warning: (code, section, message) => push(report.warnings, contract_problem(code, section, message)),
+	});
+
+	return {
+		'accounting':    conntrack_accounting(),
+		'rule_mask':     mwan4.rule_mask,
+		'rule_capacity': rule_capacity(),
+		'total':         connection_counts().total,
+		'rules':         get_status_rules(),
+		'interfaces':    interfaces_active(),
+		'strategies':    strategies_active(),
+		...report,
 	};
 }
 
@@ -4160,9 +4504,14 @@ function diagnostics_counters() {
 	summary.unreferenced = length(unreferenced);
 	summary.missing_references = length(missing_references);
 
+	let groups = group_counters(counters);
+	let active = active_by_rule();
+	for (let name in filter(keys(active), name => groups.rules[name]))
+		groups.rules[name].active_connections = active[name];
+
 	return {
 		'summary':            summary,
-		'groups':             group_counters(counters),
+		'groups':             groups,
 		'items':              counters,
 		'references':         references,
 		'unreferenced':       unreferenced,
@@ -5352,7 +5701,7 @@ function rule_family_matches(rule, family) {
 	return index(families, family) >= 0;
 }
 
-function explain_rule_match(rule, family, input) {
+function explain_rule_match(rule, family, input, stats) {
 	let matched = true;
 	let checks = {};
 	let proto = normalize_protocol(rule.proto || 'all') || 'all';
@@ -5388,11 +5737,14 @@ function explain_rule_match(rule, family, input) {
 		add_check('use_strategy', false, 'configured strategy', null);
 
 	return {
-		'rule':         rule['.name'],
-		'family':       family,
-		'matched':      matched,
-		'use_strategy': rule.use_strategy || null,
-		'checks':       checks,
+		'rule':               rule['.name'],
+		'family':             family,
+		'matched':            matched,
+		'use_strategy':       rule.use_strategy || null,
+		'checks':             checks,
+		'rule_id':            stats.id,
+		'new_connections':    stats.new_connections,
+		'active_connections': stats.active_connections,
 	};
 }
 
@@ -5487,8 +5839,9 @@ function diagnostics_explain(args) {
 	let rules = [];
 	let matched_rule = null;
 
+	let stats = get_status_rules();
 	for (let rule in ordered_rules()) {
-		let explanation = explain_rule_match(rule, family, input);
+		let explanation = explain_rule_match(rule, family, input, stats[rule['.name']]);
 		push(rules, explanation);
 		if (!matched_rule && explanation.matched)
 			matched_rule = explanation;
@@ -5525,6 +5878,8 @@ function get_diagnostics(args) {
 		result.routes = diagnostics_routes();
 	if (section == 'all' || section == 'rules')
 		result.rules = diagnostics_rules();
+	if (section == 'all' || section == 'connections')
+		result.connections = diagnostics_connections();
 	if (section == 'all' || section == 'strategies')
 		result.strategies = diagnostics_strategies();
 	if (section == 'all' || section == 'nftables')
@@ -5795,6 +6150,8 @@ mwan4.set_connected_ipv6 = set_connected_ipv6;
 mwan4.set_dynamic_nftset = set_dynamic_nftset;
 mwan4.rebuild_iface_nftfile = rebuild_iface_nftfile;
 mwan4.set_strategies_nftables = set_strategies_nftables;
+mwan4.assign_rule_ids = assign_rule_ids;
+mwan4.ensure_rule_ids = ensure_rule_ids;
 mwan4.collect_user_rules = collect_user_rules;
 mwan4.set_user_rules = set_user_rules;
 mwan4.sync_dnsmasq = sync_dnsmasq;
@@ -5841,6 +6198,8 @@ mwan4.report_connected = report_connected;
 mwan4.report_rules = report_rules;
 mwan4.report_tunnels = report_tunnels;
 mwan4.report_counters = report_counters;
+mwan4.get_connections = get_connections;
+mwan4.get_status_rules = get_status_rules;
 mwan4.summarize_counters = summarize_counters;
 mwan4.get_status_diagnostics = get_status_diagnostics;
 mwan4.report_status_diagnostics = report_status_diagnostics;

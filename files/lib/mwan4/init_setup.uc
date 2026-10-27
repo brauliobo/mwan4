@@ -30,6 +30,9 @@ m.apply_mptcp_config();
 // Generate dynamic file (base structure + interfaces + strategies)
 m.rebuild_dynamic();
 
+// Rules need their persisted ids before the rules file records them in conntrack marks.
+m.ensure_rule_ids();
+
 // Generate rules file (sets + user rules)
 let rules = m.collect_user_rules();
 m.nft_file('create', 'rules');

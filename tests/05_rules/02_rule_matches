@@ -18,9 +18,9 @@ Testing rule matches: enabled, address lists per family, MAC, DSCP, domain sets,
 		{ ".name": "default_rule_v4", "dest_ip": "0.0.0.0/0", "use_strategy": "balanced", "family": ["ipv4"] },
 		{ ".name": "default_rule_v6", "dest_ip": "::/0", "use_strategy": "balanced", "family": ["ipv6"] },
 		{ ".name": "off", "enabled": "0", "dest_ip": "192.0.2.1", "use_strategy": "balanced" },
-		{ ".name": "mixed", "label": "Mixed lists", "dest_ip": ["198.51.100.0/24", "2001:db8::/32", "203.0.113.7"], "use_strategy": "balanced", "local": "1" },
-		{ ".name": "srcs", "src_ip": ["10.0.0.1", "10.0.0.2"], "use_strategy": "balanced" },
-		{ ".name": "lan_dev", "src_mac": ["AA:BB:CC:DD:EE:01", "aa:bb:cc:dd:ee:02"], "dscp": "34", "proto": "udp", "dest_port": "443", "use_strategy": "balanced" },
+		{ ".name": "mixed", "rule_id": "1", "label": "Mixed lists", "dest_ip": ["198.51.100.0/24", "2001:db8::/32", "203.0.113.7"], "use_strategy": "balanced", "local": "1" },
+		{ ".name": "srcs", "rule_id": "2", "src_ip": ["10.0.0.1", "10.0.0.2"], "use_strategy": "balanced" },
+		{ ".name": "lan_dev", "rule_id": "3", "src_mac": ["AA:BB:CC:DD:EE:01", "aa:bb:cc:dd:ee:02"], "dscp": "34", "proto": "udp", "dest_port": "443", "use_strategy": "balanced" },
 		{ ".name": "streaming", "domain": ["Example.com", "cdn.example.net"], "dest_port": "443", "proto": "tcp", "use_strategy": "balanced", "family": ["ipv4", "ipv6"] },
 		{ ".name": "v6only_dom", "domain": ["six.example.org"], "use_strategy": "balanced", "family": ["ipv6"], "local": "1" },
 		{ ".name": "sets", "ipset": "custom_set", "use_strategy": "balanced" },
@@ -78,73 +78,158 @@ table inet fw4 {
 	counter mwan4_counter_rule_mixed_ipv4 {
 	}
 
+	counter mwan4_counter_conn_mixed_ipv4 {
+	}
+
 	counter mwan4_counter_rule_srcs_ipv4 {
+	}
+
+	counter mwan4_counter_conn_srcs_ipv4 {
 	}
 
 	counter mwan4_counter_rule_lan_dev_ipv4 {
 	}
 
+	counter mwan4_counter_conn_lan_dev_ipv4 {
+	}
+
 	counter mwan4_counter_rule_streaming_ipv4 {
+	}
+
+	counter mwan4_counter_conn_streaming_ipv4 {
 	}
 
 	counter mwan4_counter_rule_sets_ipv4 {
 	}
 
+	counter mwan4_counter_conn_sets_ipv4 {
+	}
+
 	counter mwan4_counter_rule_sets4_ipv4 {
+	}
+
+	counter mwan4_counter_conn_sets4_ipv4 {
 	}
 
 	counter mwan4_counter_rule_late_ipv4 {
 	}
 
+	counter mwan4_counter_conn_late_ipv4 {
+	}
+
 	counter mwan4_counter_rule_default_rule_v4_ipv4 {
+	}
+
+	counter mwan4_counter_conn_default_rule_v4_ipv4 {
 	}
 
 	counter mwan4_counter_rule_mixed_ipv6 {
 	}
 
+	counter mwan4_counter_conn_mixed_ipv6 {
+	}
+
 	counter mwan4_counter_rule_lan_dev_ipv6 {
+	}
+
+	counter mwan4_counter_conn_lan_dev_ipv6 {
 	}
 
 	counter mwan4_counter_rule_streaming_ipv6 {
 	}
 
+	counter mwan4_counter_conn_streaming_ipv6 {
+	}
+
 	counter mwan4_counter_rule_v6only_dom_ipv6 {
+	}
+
+	counter mwan4_counter_conn_v6only_dom_ipv6 {
 	}
 
 	counter mwan4_counter_rule_sets_ipv6 {
 	}
 
+	counter mwan4_counter_conn_sets_ipv6 {
+	}
+
 	counter mwan4_counter_rule_late_ipv6 {
+	}
+
+	counter mwan4_counter_conn_late_ipv6 {
 	}
 
 	counter mwan4_counter_rule_default_rule_v6_ipv6 {
 	}
+
+	counter mwan4_counter_conn_default_rule_v6_ipv6 {
+	}
 	chain mwan4_rules_ipv4 {
+		ip daddr { 198.51.100.0/24, 203.0.113.7 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_mixed_ipv4
+		ip daddr { 198.51.100.0/24, 203.0.113.7 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff | 0x40000
 		ip daddr { 198.51.100.0/24, 203.0.113.7 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_mixed_ipv4 jump mwan4_strategy_balanced_ipv4 comment "mixed"
+		ip saddr { 10.0.0.1, 10.0.0.2 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_srcs_ipv4
+		ip saddr { 10.0.0.1, 10.0.0.2 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff | 0x80000
 		ip saddr { 10.0.0.1, 10.0.0.2 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_srcs_ipv4 jump mwan4_strategy_balanced_ipv4 comment "srcs"
+		meta l4proto udp ether saddr { AA:BB:CC:DD:EE:01, aa:bb:cc:dd:ee:02 } ip dscp 34 udp dport { 443 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_lan_dev_ipv4
+		meta l4proto udp ether saddr { AA:BB:CC:DD:EE:01, aa:bb:cc:dd:ee:02 } ip dscp 34 udp dport { 443 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff | 0xc0000
 		meta l4proto udp ether saddr { AA:BB:CC:DD:EE:01, aa:bb:cc:dd:ee:02 } ip dscp 34 udp dport { 443 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_lan_dev_ipv4 jump mwan4_strategy_balanced_ipv4 comment "lan_dev"
+		meta l4proto tcp ip daddr @mwan4_dom_streaming_ipv4 tcp dport { 443 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_streaming_ipv4
+		meta l4proto tcp ip daddr @mwan4_dom_streaming_ipv4 tcp dport { 443 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		meta l4proto tcp ip daddr @mwan4_dom_streaming_ipv4 tcp dport { 443 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_streaming_ipv4 jump mwan4_strategy_balanced_ipv4 comment "streaming"
+		ip daddr @custom_set meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_sets_ipv4
+		ip daddr @custom_set meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		ip daddr @custom_set meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_sets_ipv4 jump mwan4_strategy_balanced_ipv4 comment "sets"
+		ip daddr @only_v4 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_sets4_ipv4
+		ip daddr @only_v4 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		ip daddr @only_v4 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_sets4_ipv4 jump mwan4_strategy_balanced_ipv4 comment "sets4"
+		meta l4proto tcp tcp dport { 22 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_late_ipv4
+		meta l4proto tcp tcp dport { 22 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		meta l4proto tcp tcp dport { 22 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_late_ipv4 jump mwan4_strategy_balanced_ipv4 comment "late"
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_default_rule_v4_ipv4
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_default_rule_v4_ipv4 jump mwan4_strategy_balanced_ipv4 comment "default_rule_v4"
 	}
 	chain mwan4_rules_out_ipv4 {
+		ip daddr { 198.51.100.0/24, 203.0.113.7 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_mixed_ipv4
+		ip daddr { 198.51.100.0/24, 203.0.113.7 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff | 0x40000
 		ip daddr { 198.51.100.0/24, 203.0.113.7 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_mixed_ipv4 jump mwan4_strategy_balanced_ipv4 comment "mixed"
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_default_rule_v4_ipv4
+		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_default_rule_v4_ipv4 jump mwan4_strategy_balanced_ipv4 comment "default_rule_v4"
 	}
 	chain mwan4_rules_ipv6 {
+		ip6 daddr 2001:db8::/32 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_mixed_ipv6
+		ip6 daddr 2001:db8::/32 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff | 0x40000
 		ip6 daddr 2001:db8::/32 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_mixed_ipv6 jump mwan4_strategy_balanced_ipv6 comment "mixed"
+		meta l4proto udp ether saddr { AA:BB:CC:DD:EE:01, aa:bb:cc:dd:ee:02 } ip6 dscp 34 udp dport { 443 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_lan_dev_ipv6
+		meta l4proto udp ether saddr { AA:BB:CC:DD:EE:01, aa:bb:cc:dd:ee:02 } ip6 dscp 34 udp dport { 443 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff | 0xc0000
 		meta l4proto udp ether saddr { AA:BB:CC:DD:EE:01, aa:bb:cc:dd:ee:02 } ip6 dscp 34 udp dport { 443 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_lan_dev_ipv6 jump mwan4_strategy_balanced_ipv6 comment "lan_dev"
+		meta l4proto tcp ip6 daddr @mwan4_dom_streaming_ipv6 tcp dport { 443 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_streaming_ipv6
+		meta l4proto tcp ip6 daddr @mwan4_dom_streaming_ipv6 tcp dport { 443 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		meta l4proto tcp ip6 daddr @mwan4_dom_streaming_ipv6 tcp dport { 443 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_streaming_ipv6 jump mwan4_strategy_balanced_ipv6 comment "streaming"
+		ip6 daddr @mwan4_dom_v6only_dom_ipv6 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_v6only_dom_ipv6
+		ip6 daddr @mwan4_dom_v6only_dom_ipv6 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		ip6 daddr @mwan4_dom_v6only_dom_ipv6 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_v6only_dom_ipv6 jump mwan4_strategy_balanced_ipv6 comment "v6only_dom"
+		ip6 daddr @custom_set_ipv6 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_sets_ipv6
+		ip6 daddr @custom_set_ipv6 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		ip6 daddr @custom_set_ipv6 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_sets_ipv6 jump mwan4_strategy_balanced_ipv6 comment "sets"
+		meta l4proto tcp tcp dport { 22 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_late_ipv6
+		meta l4proto tcp tcp dport { 22 } meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		meta l4proto tcp tcp dport { 22 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_late_ipv6 jump mwan4_strategy_balanced_ipv6 comment "late"
+		ip6 daddr ::/0 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_default_rule_v6_ipv6
+		ip6 daddr ::/0 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		ip6 daddr ::/0 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_default_rule_v6_ipv6 jump mwan4_strategy_balanced_ipv6 comment "default_rule_v6"
 	}
 	chain mwan4_rules_out_ipv6 {
+		ip6 daddr 2001:db8::/32 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_mixed_ipv6
+		ip6 daddr 2001:db8::/32 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff | 0x40000
 		ip6 daddr 2001:db8::/32 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_mixed_ipv6 jump mwan4_strategy_balanced_ipv6 comment "mixed"
+		ip6 daddr @mwan4_dom_v6only_dom_ipv6 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_v6only_dom_ipv6
+		ip6 daddr @mwan4_dom_v6only_dom_ipv6 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		ip6 daddr @mwan4_dom_v6only_dom_ipv6 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_v6only_dom_ipv6 jump mwan4_strategy_balanced_ipv6 comment "v6only_dom"
+		ip6 daddr ::/0 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_default_rule_v6_ipv6
+		ip6 daddr ::/0 meta mark & 0x3f00 == 0 ct mark set ct mark & 0xff03ffff
 		ip6 daddr ::/0 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_default_rule_v6_ipv6 jump mwan4_strategy_balanced_ipv6 comment "default_rule_v6"
 	}
 }

@@ -52,8 +52,8 @@ control: yes
 advanced_control: yes
 pbr_import: yes
 cap version: 2
-cap status sections: interfaces,connected,strategies,diagnostics,counters,tunnels
-cap diagnostic sections: all,summary,interfaces,routes,rules,strategies,nftables,service,tunnels,counters,ownership,pbr,mptcp,quality,probes,vrf,explain,packages
+cap status sections: interfaces,connected,strategies,rules,diagnostics,counters,tunnels
+cap diagnostic sections: all,summary,interfaces,routes,rules,connections,strategies,nftables,service,tunnels,counters,ownership,pbr,mptcp,quality,probes,vrf,explain,packages
 cap probe methods: ping,httping,nslookup,arping,nping-tcp,nping-udp,nping-icmp,nping-arp
 cap control actions: ifup,ifdown,start,stop,restart,reload,reset_counters
 cap advanced actions: install_feature,wireguard_keygen,apply_tunnel_exemptions,apply_bfd

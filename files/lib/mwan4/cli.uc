@@ -28,6 +28,7 @@ function cmd_help() {
 	command_help('strategies',       'Show currently active strategy');
 	command_help('connected',        'Show directly connected networks');
 	command_help('rules',            'Show active rules');
+	command_help('connections [key=value...]', 'List tracked connections (rule, interface, strategy, family, proto, search, limit, offset)');
 	command_help('tunnels',          'Show tunnel metadata and underlay warnings');
 	command_help('diagnostics',      'Show status warnings and suggested actions');
 	command_help('capabilities',     'Show backend RPC capabilities as JSON');
@@ -113,6 +114,25 @@ function cmd_rules() {
 			println(line);
 		println('');
 	}
+}
+
+function endpoint(addr, port) {
+	return sprintf(index(addr, ':') >= 0 ? '[%s]:%s' : '%s:%s', addr, port ?? '-');
+}
+
+function cmd_connections(args) {
+	let filters = {};
+	for (let arg in args) {
+		let pair = match(arg, /^([a-z]+)=(.*)$/);
+		if (pair) filters[pair[1]] = pair[2];
+	}
+
+	let result = m.get_connections(filters);
+	println(sprintf('%d connections%s:', result.total, result.truncated ? ' (truncated)' : ''));
+	for (let c in result.items)
+		println(sprintf(' %-6s %s -> %s %s timeout=%d bytes=%d rule=%s via=%s strategy=%s',
+			c.proto, endpoint(c.src, c.sport), endpoint(c.dst, c.dport), c.state || '-', c.timeout, c.bytes, c.rule || '-', c.interface, c.strategy || '-'));
+	println('');
 }
 
 function cmd_tunnels() {
@@ -303,6 +323,7 @@ case 'interfaces':
 case 'strategies':
 case 'connected':
 case 'rules':
+case 'connections':
 case 'tunnels':
 case 'diagnostics':
 case 'capabilities':
@@ -322,6 +343,7 @@ case 'internal':
 	case 'strategies':  cmd_strategies(); break;
 	case 'connected':   cmd_connected(); break;
 	case 'rules':       cmd_rules(); break;
+	case 'connections': cmd_connections(args); break;
 	case 'tunnels':     cmd_tunnels(); break;
 	case 'diagnostics': cmd_diagnostics(); break;
 	case 'capabilities': exit(cmd_capabilities()); break;
