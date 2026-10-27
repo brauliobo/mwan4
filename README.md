@@ -34,6 +34,7 @@ OpenWrt package for the nftables-based `mwan4` service.
 | `local` | `1` also applies the rule to router-originated traffic (default `0`: forwarded traffic only). The `default_rule_*` catch-alls always apply to both. |
 | `ipset` | Compatibility nft set name. Rules limited to one family use the name as is; dual-family rules use `<name>` for IPv4 and `<name>_ipv6` for IPv6. |
 | `use_strategy` | Strategy, or `default` / `unreachable` / `blackhole`. |
+| `rule_id` | Managed by mwan4, see [Connection counting](#connection-counting). Do not edit. |
 
 All options of a rule must match (AND). `rpc validate` reports every invalid value; invalid list entries are never emitted into nftables.
 
@@ -48,6 +49,81 @@ Domain rules need `dnsmasq-full` (nftset support, `SUGGESTS` in the package). Wi
 ### Tunnel interfaces
 
 An `interface` with `option type 'tunnel'` or `option default_route '1'` gets `default dev <device>` in its mwan4 table (per `family`), and its health checks are sent through the device with its own mark. This works for tunnels without a netifd default route (for example WireGuard with `defaultroute '0'`). A strategy that only contains such an interface with `last_resort 'unreachable'` fails closed: an IPv4-only tunnel has no IPv6 route, so IPv6 traffic is unreachable instead of leaking.
+
+### Connection counting
+
+Every rule counts the connections it routes, and the active connections can be attributed to rule, WAN and strategy.
+
+- **New connections** (`new_connections`): an nft counter `mwan4_counter_conn_<rule>_<family>` next to each rule counts `ct state new` matches. It is cumulative since the ruleset was loaded and is cleared by `reset_counters`. Forwarded and `local` traffic of a rule share one counter per family.
+- **Active connections** (`active_connections`): the entries in the conntrack table, grouped by the rule and WAN recorded in their conntrack mark. Only connections carrying mwan4 WAN bits are counted; connections that mwan4 never saw (for example LAN to LAN) and connections made before mwan4 was loaded are ignored or fall under the catch-all.
+
+When a rule matches it records its `rule_id` in the conntrack mark with constant same-register operations (`ct mark set ct mark & <~rule_mask> | <id bits>`). The WAN bits (`mmx_mask`) and every other owner's bits are untouched, mwan4 never copies the whole packet mark into the conntrack mark. The `default_rule_*` catch-alls clear the rule bits, so their connections have id 0 and show up as the catch-all (`rule` is empty in `connections`).
+
+| Global option | Meaning |
+| --- | --- |
+| `rule_mask` | Conntrack mark bits that hold the rule id (default `0x00fc0000`: six bits, 63 rule ids). Must not overlap `mmx_mask`; an overlapping or invalid mask disables the rule bits (`validate` reports `ruleMaskOverlap` / `invalidRuleMask`), counters keep working. The mask may be non-contiguous. |
+
+Default mask rationale: the default layouts of the other mark users cover all 32 bits (mwan4 `0x00003f00`, Tomato QoS class `0x000000ff`, DPI `0x0000c000` and rule `0xff000000`, pbr `0x00ff0000`). pbr is the only owner that never reads or writes conntrack marks (its marks live on the packet only and use the low bits of its mask first), so `rule_mask` takes the upper bits 18-23 of the pbr range. It cannot collide with mwan4 or Tomato QoS in either mark. The only way it can reach pbr is a router that runs pbr and Tomato QoS at the same time, because Tomato copies the whole conntrack mark into the packet mark; `validate` warns (`ruleMaskSharedMarks`) when `rule_mask` overlaps the masks of an enabled pbr or tomato-qos, and `rule_mask` can be moved to any bits those do not use.
+
+`rule_id` is a persisted option of `config rule` sections: unique, `1` to the capacity of `rule_mask` (63 by default). mwan4 assigns the lowest free id to every rule that lacks a valid, unique one when the service starts or reloads and when `pbr_import` is applied (re-imported rules keep their id). Ids never change while the section exists, so reordering or editing rules keeps live connections attributed correctly; deleting a rule frees its id, and its remaining connections count under the catch-all. `validate` and `diagnostics connections` warn when the rules do not fit (`ruleIdCapacity`) or an id is invalid or duplicated (`invalidRuleId`, `duplicateRuleId`). A rule without an id is not attributed. The first start after an upgrade writes the ids into `/etc/config/mwan4`, so procd may run one extra reload.
+
+The table is read in a single pass over `/proc/net/nf_conntrack` (no extra package) and the counts are cached for two seconds inside rpcd, so concurrent status polls share one scan.
+
+#### Status fields
+
+`ubus call mwan4 status` (also `{"section":"rules"}` for the rules alone) gains these fields; the existing ones are unchanged. Every `{ipv4, ipv6, total}` object has that shape.
+
+```json
+{
+  "rules": {
+    "youtube": {
+      "id": 7, "label": "youtube", "enabled": true, "strategy": "tim_first",
+      "new_connections":    { "ipv4": 12, "ipv6": 5, "total": 17 },
+      "active_connections": { "ipv4": 3,  "ipv6": 0, "total": 3 }
+    },
+    "default_rule_v4": { "id": 0, "label": "default_rule_v4", "enabled": true, "strategy": "failover",
+      "new_connections": { "ipv4": 40, "ipv6": 0, "total": 40 }, "active_connections": { "ipv4": 4, "ipv6": 0, "total": 4 } }
+  },
+  "interfaces": { "wan": { "...": "...", "active_connections": { "ipv4": 4, "ipv6": 0, "total": 4 } } },
+  "strategy_status": { "ipv4": { "failover": { "...": "...", "active_connections": 5 } } }
+}
+```
+
+- `rules.<name>` covers every rule including the catch-alls (`id` 0). The catch-alls also own connections whose rule id no rule claims.
+- `interfaces.<name>.active_connections` counts the connections routed through that WAN (all rules); `diagnostics interfaces` shows the same under `runtime`.
+- `strategy_status.<family>.<strategy>.active_connections` is a number for that family: the sum over the rules (and catch-alls) that use the strategy. The other strategy fields are unchanged.
+- `ubus call mwan4 diagnostics '{"section":"counters"}'` adds `new_connections` / `active_connections` to `groups.rules.<name>` and a `connections` count to `summary` (connection counters are excluded from the packet and byte totals). `{"section":"connections"}` returns `accounting`, `rule_mask`, `rule_capacity`, `total`, `rules`, `interfaces`, `strategies`, `errors` and `warnings`. `{"section":"explain"}` rule entries gain `rule_id`, `new_connections` and `active_connections`.
+- `capabilities.connections` reports `rule_mask`, `rule_capacity`, `limit_default`, `limit_max` and the supported `filters`.
+
+#### `connections` RPC
+
+`ubus call mwan4 connections '{"rule":"youtube","limit":50}'` lists the tracked connections (only those with mwan4 WAN bits).
+
+| Argument | Meaning |
+| --- | --- |
+| `rule` | Rule section name; a catch-all name selects the connections without rule bits of its family. |
+| `interface` | WAN interface name, or `default` / `blackhole` / `unreachable`. |
+| `strategy` | Strategy name (`use_strategy` of the owning rule or catch-all). |
+| `family`, `proto` | `ipv4` / `ipv6`; conntrack protocol name (`tcp`, `udp`, `icmp`, ...). |
+| `search` | Case-insensitive substring over family, protocol, addresses, ports (also `addr:port`), state, rule, label, WAN and strategy. |
+| `limit`, `offset` | Page size (default 200, clamped to 1-1000) and start index. |
+
+All filters combine with AND. The result is sorted by bytes (conntrack accounting, `nf_conntrack_acct=1`) descending, then by the longest remaining timeout, so with accounting off it is the most recently active first.
+
+```json
+{
+  "ok": true, "total": 3, "truncated": false, "accounting": true,
+  "items": [
+    { "family": "ipv4", "proto": "tcp", "src": "10.0.0.7", "sport": 44602, "dst": "205.237.105.139", "dport": 8080,
+      "state": "ESTABLISHED", "timeout": 7439, "packets": 6954, "bytes": 4595854,
+      "rule": "torrent", "rule_label": "BitTorrent", "interface": "wan", "strategy": "backup" }
+  ]
+}
+```
+
+`total` is the number of matching connections before paging and `truncated` is true when more than `offset + limit` match. `sport` / `dport` are `null` for protocols without ports, `state` is empty for stateless protocols, `packets` and `bytes` sum both directions and are `0` without accounting, IPv6 addresses are shortened, `rule` and `rule_label` are empty for connections that only matched a catch-all, and `strategy` is the strategy of the owning rule or catch-all.
+
+CLI: `mwan4 rules` appends the rule id, active and new connections to each rule, `mwan4 interfaces` and `mwan4 strategies` show the active connection counts, and `mwan4 connections [rule=<name>] [interface=<wan>] [strategy=<name>] [family=ipv4|ipv6] [proto=<proto>] [search=<text>] [limit=<n>] [offset=<n>]` prints the list.
 
 ## Importing pbr policies
 
