@@ -1,0 +1,698 @@
+Testing pbr_import against a real router configuration (pbr, mwan4 and netifd), sanitised.
+
+-- File uci/pbr.json --
+{
+	"pbr": [
+		{
+			".name": "config",
+			"enabled": "1",
+			"uplink_ip_rules_priority": "900",
+			"verbosity": "0",
+			"strict_enforcement": "0",
+			"resolver_set": "dnsmasq.nftset",
+			"resolver_instance": [
+				"*"
+			],
+			"ipv6_enabled": "1",
+			"boot_timeout": "30",
+			"rule_create_option": "add",
+			"procd_boot_delay": "0",
+			"procd_reload_delay": "1",
+			"nft_rule_counter": "0",
+			"nft_set_auto_merge": "1",
+			"nft_set_counter": "0",
+			"nft_set_flags_interval": "1",
+			"nft_set_flags_timeout": "0",
+			"nft_set_policy": "performance",
+			"wan_dscp": "34",
+			"sl_wan_dscp": "21",
+			"wg_vpnu_br_dscp": "13",
+			"wg_vpnu_usmia_dscp": "8",
+			"uplink_interface": "wan_vivo",
+			"config_compat": "25",
+			"config_version": "dev-test",
+			"netifd_strict_enforcement": "0",
+			"uplink_interface6": "wan_vivo6",
+			"ignored_interface": [
+				"wan_str",
+				"wan_str6"
+			],
+			"supported_interface": [
+				"wan_vivo",
+				"wan_vivo6",
+				"wan_tim",
+				"wan_tim6",
+				"wan_str",
+				"wg_tim",
+				"wg_str",
+				"wg_dfq",
+				"wg_vpnu_usmi",
+				"wg_vivo",
+				"wg_vpnu_fr",
+				"wg_vpnu_br",
+				"wg_wan"
+			]
+		}
+	],
+	"include": [
+		{
+			"path": "/usr/share/pbr/pbr.user.aws",
+			"enabled": "0"
+		},
+		{
+			"path": "/usr/share/pbr/pbr.user.netflix",
+			"enabled": "0"
+		}
+	],
+	"policy": [
+		{
+			"name": "vivo modem",
+			"dest_addr": "192.168.15.1",
+			"interface": "wan_vivo"
+		},
+		{
+			"name": "ifconfig.me",
+			"dest_addr": "ifconfig.me",
+			"interface": "wan_vivo"
+		},
+		{
+			"name": "ifconfig.co",
+			"dest_addr": "ifconfig.co",
+			"interface": "wan_tim"
+		},
+		{
+			"name": "speed cloudflare",
+			"dest_addr": "speed.cloudflare.com",
+			"interface": "wan_vivo"
+		},
+		{
+			"name": "myip",
+			"dest_addr": "myip.com",
+			"interface": "wan_tim"
+		},
+		{
+			"name": "uol",
+			"dest_addr": "uol.com.br",
+			"interface": "wan_str",
+			"enabled": "0"
+		},
+		{
+			"name": "olery",
+			"dest_addr": "olery.com visit.com",
+			"interface": "wg_wan"
+		},
+		{
+			"name": "meta quest",
+			"src_addr": "192.168.1.154",
+			"interface": "wg_vpnu_usmi",
+			"enabled": "0"
+		},
+		{
+			"name": "rumble",
+			"dest_addr": "rumble.com rmbl.ws 1a-1791.com rumble.cloud",
+			"interface": "wg_vpnu_usmi"
+		},
+		{
+			"name": "torrent",
+			"dest_addr": "torrent-a.example.com torrent-b.example.com",
+			"interface": "wg_vpnu_usmi"
+		},
+		{
+			"name": "youtube",
+			"dest_addr": " youtu.be youtube.com googlevideo.com wide-youtube.l.google.com withyoutube.com youtu.be youtube-nocookie.com youtube-ui.l.google.com",
+			"interface": "wan_tim"
+		},
+		{
+			"dest_addr": "globo.com globoplay.com",
+			"interface": "wan_tim",
+			"name": "premiere globo play"
+		},
+		{
+			"name": "vps",
+			"dest_addr": "vps.example.org",
+			"interface": "wan_tim",
+			"enabled": "0"
+		},
+		{
+			"name": "datafq",
+			"dest_addr": "datafq.com",
+			"interface": "wg_vpnu_fr",
+			"enabled": "0"
+		},
+		{
+			"name": "telegram api",
+			"dest_addr": "api.telegram.org",
+			"interface": "wan_tim",
+			"enabled": "0"
+		},
+		{
+			"name": "proxy decodo",
+			"dest_addr": "decodo.com",
+			"interface": "wan_tim"
+		},
+		{
+			"name": "proxy proxyrack",
+			"dest_addr": "proxyrack.net",
+			"interface": "wan_tim"
+		},
+		{
+			"name": "cloudflare network",
+			"dest_addr": "103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 104.16.0.0/13 104.24.0.0/14 108.162.192.0/18 131.0.72.0/22 141.101.64.0/18 162.158.0.0/15 172.64.0.0/13 173.245.48.0/20 188.114.96.0/20 190.93.240.0/20 197.234.240.0/22 198.41.128.0/17",
+			"interface": "wan_vivo",
+			"enabled": "0"
+		},
+		{
+			"name": "google meet and services",
+			"dest_addr": "accounts.google.com apis.google.com meetings.googleapis.com hangouts.googleapis.com meet.google.com apps.google.com docs.google.com",
+			"interface": "wan_tim",
+			"enabled": "0"
+		},
+		{
+			"name": "google meet media",
+			"interface": "wan_tim",
+			"dest_port": "19302-19309",
+			"enabled": "0"
+		},
+		{
+			"name": "google meet media",
+			"dest_port": "3478",
+			"interface": "wan_tim",
+			"enabled": "0"
+		},
+		{
+			"name": "jitsi",
+			"dest_addr": "meet.jit.si meet-jit-si-turnrelay.jitsi.net 129.213.92.0/24",
+			"interface": "wan_tim",
+			"enabled": "0"
+		},
+		{
+			"name": "teams",
+			"dest_addr": "microsoft.com",
+			"interface": "wan_tim",
+			"enabled": "0"
+		},
+		{
+			"name": "slack",
+			"dest_addr": "slack.com",
+			"interface": "wan_vivo",
+			"enabled": "0"
+		},
+		{
+			"name": "aur",
+			"dest_addr": "aur.archlinux.org",
+			"interface": "wg_wan",
+			"enabled": "0"
+		},
+		{
+			"name": "apidock",
+			"dest_addr": "apidock.com",
+			"interface": "wan_vivo",
+			"enabled": "0"
+		},
+		{
+			"name": "mercadolivre",
+			"dest_addr": "mercadolivre.com.br",
+			"interface": "wan_vivo",
+			"enabled": "0"
+		},
+		{
+			"name": "arch download",
+			"dest_addr": "osbeck.com",
+			"interface": "wan_vivo",
+			"enabled": "0"
+		},
+		{
+			"name": "millenniumbcp",
+			"dest_addr": "millenniumbcp.pt",
+			"interface": "wan_vivo",
+			"enabled": "0"
+		},
+		{
+			"name": "picnic",
+			"dest_addr": "usepicnic.com",
+			"interface": "wan_vivo",
+			"enabled": "0"
+		},
+		{
+			"dest_addr": "pkg.dev",
+			"interface": "wan_vivo",
+			"enabled": "0"
+		},
+		{
+			"name": "Polymc (tim hang)",
+			"dest_addr": "polymc.org",
+			"interface": "wan_vivo",
+			"enabled": "0"
+		},
+		{
+			"name": "mc wan2",
+			"dest_addr": "mcpvp.club catpvp.net",
+			"interface": "wan_tim"
+		},
+		{
+			"name": "discord",
+			"dest_addr": "discord.com discord.gg discordapp.com discordapp.net discord.media discordcdn.com discordstatus.com discord.co discord.gift dis.gd discordapp.io",
+			"interface": "wg_vpnu_usmi",
+			"enabled": "1"
+		},
+		{
+			"name": "discord dtls udp",
+			"dest_addr": "discord.com discord.gg discordapp.com discordapp.net discord.media discordcdn.com discordstatus.com discord.co discord.gift dis.gd discordapp.io",
+			"proto": "udp",
+			"dest_port": "443",
+			"interface": "wan_tim",
+			"enabled": "0"
+		},
+		{
+			"name": "discord voice udp",
+			"enabled": "1",
+			"dest_addr": "104.29.0.0/16 66.22.192.0/18",
+			"proto": "udp",
+			"interface": "wg_vpnu_usmi",
+			"dest_port": "1-65535"
+		},
+		{
+			"name": "hcaptcha",
+			"enabled": "1",
+			"interface": "wg_vpnu_usmi",
+			"dest_addr": "hcaptcha.com newassets.hcaptcha.com imgs.hcaptcha.com api.hcaptcha.com js.hcaptcha.com"
+		}
+	],
+	"dns_policy": [
+		{
+			"name": "use",
+			"dest_dns": "wan_vivo",
+			"dest_dns_port": "53",
+			"enabled": "0"
+		}
+	]
+}
+-- End --
+
+-- File uci/mwan4.json --
+{
+	"globals": [
+		{
+			".name": "globals",
+			"mmx_mask": "0x3F00"
+		}
+	],
+	"rule": [
+		{
+			".name": "default_rule_v4",
+			"dest_ip": "0.0.0.0/0",
+			"use_strategy": "failover",
+			"proto": "all",
+			"sticky": "0",
+			"family": [
+				"ipv4"
+			]
+		},
+		{
+			".name": "default_rule_v6",
+			"dest_ip": "::/0",
+			"use_strategy": "failover",
+			"proto": "all",
+			"sticky": "0",
+			"family": [
+				"ipv6"
+			]
+		}
+	],
+	"interface": [
+		{
+			".name": "wan_vivo",
+			"enabled": "1",
+			"initial_state": "offline",
+			"track_ip": [
+				"1.1.1.1"
+			],
+			"track_method": "ping",
+			"reliability": "1",
+			"count": "1",
+			"size": "56",
+			"max_ttl": "60",
+			"check_quality": "1",
+			"failure_latency": "1000",
+			"failure_loss": "40",
+			"recovery_latency": "500",
+			"recovery_loss": "10",
+			"timeout": "4",
+			"interval": "10",
+			"failure_interval": "5",
+			"recovery_interval": "5",
+			"down": "5",
+			"up": "5",
+			"id": "1",
+			"table_id": "1",
+			"mark": "0x100",
+			"flush_conntrack": [
+				"disconnected"
+			],
+			"family": [
+				"ipv4"
+			]
+		},
+		{
+			".name": "wan_vivo6",
+			"initial_state": "offline",
+			"track_ip": [
+				"2606:4700:4700::1111"
+			],
+			"track_method": "ping",
+			"reliability": "1",
+			"count": "1",
+			"size": "56",
+			"max_ttl": "60",
+			"check_quality": "1",
+			"failure_latency": "1000",
+			"failure_loss": "40",
+			"recovery_latency": "500",
+			"recovery_loss": "10",
+			"timeout": "4",
+			"interval": "10",
+			"failure_interval": "5",
+			"recovery_interval": "5",
+			"down": "5",
+			"up": "5",
+			"enabled": "1",
+			"id": "2",
+			"table_id": "2",
+			"mark": "0x200",
+			"flush_conntrack": [
+				"disconnected"
+			],
+			"family": [
+				"ipv6"
+			]
+		},
+		{
+			".name": "wan_tim",
+			"enabled": "1",
+			"initial_state": "online",
+			"track_method": "ping",
+			"reliability": "1",
+			"count": "1",
+			"size": "56",
+			"max_ttl": "60",
+			"timeout": "2",
+			"interval": "5",
+			"failure_interval": "2",
+			"recovery_interval": "2",
+			"down": "3",
+			"up": "3",
+			"track_ip": [
+				"1.1.1.1",
+				"8.8.8.8"
+			],
+			"id": "3",
+			"table_id": "3",
+			"mark": "0x300",
+			"family": [
+				"ipv4"
+			]
+		},
+		{
+			".name": "wan_tim6",
+			"initial_state": "online",
+			"track_method": "ping",
+			"reliability": "1",
+			"count": "1",
+			"size": "56",
+			"max_ttl": "60",
+			"timeout": "2",
+			"interval": "5",
+			"failure_interval": "2",
+			"recovery_interval": "2",
+			"down": "3",
+			"up": "3",
+			"track_ip": [
+				"2606:4700:4700::1111",
+				"2001:4860:4860::8888"
+			],
+			"enabled": "1",
+			"id": "4",
+			"table_id": "4",
+			"mark": "0x400",
+			"family": [
+				"ipv6"
+			]
+		},
+		{
+			".name": "wan_str",
+			"enabled": "1",
+			"initial_state": "online",
+			"track_method": "ping",
+			"reliability": "1",
+			"count": "1",
+			"size": "56",
+			"max_ttl": "60",
+			"timeout": "4",
+			"interval": "10",
+			"failure_interval": "5",
+			"recovery_interval": "5",
+			"down": "5",
+			"up": "5",
+			"id": "5",
+			"table_id": "5",
+			"mark": "0x500",
+			"track_ip": [
+				"1.1.1.1",
+				"8.8.8.8"
+			],
+			"check_quality": "0",
+			"failure_latency": "1000",
+			"failure_loss": "40",
+			"recovery_latency": "500",
+			"recovery_loss": "10",
+			"family": [
+				"ipv4"
+			]
+		},
+		{
+			".name": "wan_str6",
+			"initial_state": "online",
+			"track_method": "ping",
+			"reliability": "1",
+			"count": "1",
+			"size": "56",
+			"max_ttl": "60",
+			"timeout": "4",
+			"interval": "10",
+			"failure_interval": "5",
+			"recovery_interval": "5",
+			"down": "5",
+			"up": "5",
+			"track_ip": [
+				"2606:4700:4700::1111"
+			],
+			"enabled": "1",
+			"id": "6",
+			"table_id": "6",
+			"mark": "0x600",
+			"family": [
+				"ipv6"
+			]
+		}
+	],
+	"strategy": [
+		{
+			".name": "failover",
+			"use_route": [
+				"ui_wan_vivo_m1_1782773341900",
+				"ui_wan_vivo6_m2_1782773341900",
+				"ui_wan_tim_m3_1782773341900",
+				"ui_wan_tim6_m4_1782773341900",
+				"ui_wan_str_m5_1782773341900",
+				"ui_wan_str6_m6_1782773341900"
+			],
+			"last_resort": "unreachable"
+		}
+	],
+	"route": [
+		{
+			".name": "ui_wan_vivo_m1_1782773341900",
+			"interface": "wan_vivo",
+			"metric": "1",
+			"weight": "1"
+		},
+		{
+			".name": "ui_wan_vivo6_m2_1782773341900",
+			"interface": "wan_vivo6",
+			"metric": "2",
+			"weight": "1"
+		},
+		{
+			".name": "ui_wan_tim_m3_1782773341900",
+			"interface": "wan_tim",
+			"metric": "3",
+			"weight": "1"
+		},
+		{
+			".name": "ui_wan_tim6_m4_1782773341900",
+			"interface": "wan_tim6",
+			"metric": "4",
+			"weight": "1"
+		},
+		{
+			".name": "ui_wan_str_m5_1782773341900",
+			"interface": "wan_str",
+			"metric": "5",
+			"weight": "1"
+		},
+		{
+			".name": "ui_wan_str6_m6_1782773341900",
+			"interface": "wan_str6",
+			"metric": "6",
+			"weight": "1"
+		}
+	]
+}
+-- End --
+
+-- File uci/network.json --
+{
+	"interface": [
+		{
+			".name": "lan",
+			"proto": "static"
+		},
+		{
+			".name": "wg_tim",
+			"proto": "wireguard"
+		},
+		{
+			".name": "wan_vivo",
+			"proto": "dhcp"
+		},
+		{
+			".name": "wan_vivo6",
+			"proto": "dhcpv6"
+		},
+		{
+			".name": "wg_vivo",
+			"proto": "wireguard"
+		},
+		{
+			".name": "wan_tim",
+			"proto": "dhcp"
+		},
+		{
+			".name": "wan_str",
+			"proto": "dhcp"
+		},
+		{
+			".name": "wan_str6",
+			"proto": "dhcpv6"
+		},
+		{
+			".name": "wg_str",
+			"proto": "wireguard"
+		},
+		{
+			".name": "wg_vpnu_usmi",
+			"proto": "wireguard",
+			"addresses": [
+				"10.202.0.2/32"
+			],
+			"dns": [
+				"10.202.0.1"
+			]
+		},
+		{
+			".name": "wan_tim6",
+			"proto": "dhcpv6"
+		},
+		{
+			".name": "wg_wan",
+			"proto": "wireguard",
+			"addresses": [
+				"10.201.1.10/32",
+				"fd00:201:1:1::10/128"
+			]
+		},
+		{
+			".name": "wg_vpnu_fr",
+			"proto": "wireguard",
+			"addresses": [
+				"10.203.0.2/32"
+			],
+			"dns": [
+				"10.203.0.1"
+			]
+		},
+		{
+			".name": "wg_vpnu_br",
+			"proto": "wireguard"
+		}
+	],
+	"wireguard_wg_wan": [
+		{
+			"allowed_ips": [
+				"10.201.1.1/32",
+				"fd00:201:1:1::1/128",
+				"0.0.0.0/0",
+				"10.204.1.0/24"
+			]
+		}
+	],
+	"wireguard_wg_vpnu_usmi": [
+		{
+			"allowed_ips": [
+				"0.0.0.0/0"
+			]
+		}
+	],
+	"wireguard_wg_vpnu_fr": [
+		{
+			"allowed_ips": [
+				"0.0.0.0/0"
+			]
+		}
+	]
+}
+-- End --
+
+-- File fs/open~_etc_config_mwan4.txt --
+config rule 'default_rule_v4'
+-- End --
+-- Testcase --
+import m from 'mwan4';
+import importer from 'pbr_import';
+
+function dump_sections(stype) {
+	let c = require('uci').cursor();
+	c.load('mwan4');
+	let lines = [];
+	c.foreach('mwan4', stype, s => push(lines, s));
+	return lines;
+}
+
+function dump_options(section) {
+	let keys_ = sort(filter(keys(section), k => index(k, '.') != 0));
+	return join(' ', map(keys_, k => k + '=' + (type(section[k]) == 'array' ? '[' + join(',', section[k]) + ']' : section[k])));
+}
+
+m.set_scriptname('test');
+m.init();
+importer.pbr_import({ apply: true });
+
+let rules = {};
+for (let r in dump_sections('rule')) rules[r['.name']] = r;
+for (let name in ['youtube', 'discord_voi', 'cloudflare', 'meta_quest', 'jitsi_1', 'jitsi_2', 'google_me_2_1', 'google_me_2_2', 'google_me_3_1', 'mc_wan2', 'hcaptcha'])
+	print(name + ': ' + dump_options(rules[name]) + '\n');
+-- End --
+
+-- Expect stdout --
+youtube: domain=[youtu.be,youtube.com,googlevideo.com,wide-youtube.l.google.com,withyoutube.com,youtube-nocookie.com,youtube-ui.l.google.com] enabled=1 label=youtube local=0 pbr_import=1 use_strategy=tim_first
+discord_voi: dest_ip=[104.29.0.0/16,66.22.192.0/18] dest_port=1-65535 enabled=1 label=discord voice udp local=0 pbr_import=1 proto=udp use_strategy=vpnu_usmi_only
+cloudflare: dest_ip=[103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,104.16.0.0/13,104.24.0.0/14,108.162.192.0/18,131.0.72.0/22,141.101.64.0/18,162.158.0.0/15,172.64.0.0/13,173.245.48.0/20,188.114.96.0/20,190.93.240.0/20,197.234.240.0/22,198.41.128.0/17] enabled=0 label=cloudflare network local=0 pbr_import=1 use_strategy=vivo_first
+meta_quest: enabled=0 label=meta quest local=0 pbr_import=1 src_ip=[192.168.1.154] use_strategy=vpnu_usmi_only
+jitsi_1: dest_ip=[129.213.92.0/24] enabled=0 label=jitsi local=0 pbr_import=1 use_strategy=tim_first
+jitsi_2: domain=[meet.jit.si,meet-jit-si-turnrelay.jitsi.net] enabled=0 label=jitsi local=0 pbr_import=1 use_strategy=tim_first
+google_me_2_1: dest_port=19302-19309 enabled=0 label=google meet media local=0 pbr_import=1 proto=tcp use_strategy=tim_first
+google_me_2_2: dest_port=19302-19309 enabled=0 label=google meet media local=0 pbr_import=1 proto=udp use_strategy=tim_first
+google_me_3_1: dest_port=3478 enabled=0 label=google meet media local=0 pbr_import=1 proto=tcp use_strategy=tim_first
+mc_wan2: domain=[mcpvp.club,catpvp.net] enabled=1 label=mc wan2 local=0 pbr_import=1 use_strategy=tim_first
+hcaptcha: domain=[hcaptcha.com,newassets.hcaptcha.com,imgs.hcaptcha.com,api.hcaptcha.com,js.hcaptcha.com] enabled=1 label=hcaptcha local=0 pbr_import=1 use_strategy=vpnu_usmi_only
+-- End --

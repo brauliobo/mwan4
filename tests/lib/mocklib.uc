@@ -219,6 +219,9 @@ global.mocklib = {
 	read_json_file,
 	trace_call,
 
+	/* UCI configs committed by tests, shadowing the JSON fixtures */
+	uci_store: {},
+
 	/* Store content in the captured map (called by mock writefile) */
 	capture: (path, data) => { _captured[path] = data; },
 

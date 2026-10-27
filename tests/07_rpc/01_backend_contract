@@ -12,7 +12,7 @@ Testing rpcd backend contract and constrained control helpers.
 let rpcd = require('rpcd_mwan4');
 let methods = rpcd.mwan4;
 
-for (let method in ['status', 'capabilities', 'validate', 'diagnostics', 'control', 'advanced_control'])
+for (let method in ['status', 'capabilities', 'validate', 'diagnostics', 'control', 'advanced_control', 'pbr_import'])
 	print(method + ': ' + (exists(methods, method) ? 'yes' : 'no') + '\n');
 
 let caps = methods.capabilities.call({ args: {} });
@@ -50,6 +50,7 @@ validate: yes
 diagnostics: yes
 control: yes
 advanced_control: yes
+pbr_import: yes
 cap version: 2
 cap status sections: interfaces,connected,strategies,diagnostics,counters,tunnels
 cap diagnostic sections: all,summary,interfaces,routes,rules,strategies,nftables,service,tunnels,counters,ownership,pbr,mptcp,quality,probes,vrf,explain,packages

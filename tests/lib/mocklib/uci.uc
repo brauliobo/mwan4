@@ -76,6 +76,12 @@ return {
 			    path = sprintf("uci/%s.json", basename),
 			    mock = mocklib.read_json_file(path);
 
+			/* Configs committed through a cursor shadow the fixture. */
+			if (exists(mocklib.uci_store, basename)) {
+				this._configs[basename] = json(sprintf('%J', mocklib.uci_store[basename]));
+				return true;
+			}
+
 			if (!mock || mock != mock) {
 				mocklib.I("No configuration fixture defined for uci package %s.", file);
 				mocklib.I("Provide a mock configuration through the following JSON file:\n%s\n", path);
@@ -130,8 +136,68 @@ return {
 			return section ? this._get_section(config, section) : this._configs[config];
 		},
 
+		_sorted: function(config) {
+			let cfg = this._configs[config];
+			return sort(keys(cfg), (a, b) => cfg[a]['.index'] - cfg[b]['.index']);
+		},
+
+		_reindex: function(config, order) {
+			for (let n, sid in order)
+				this._configs[config][sid]['.index'] = n;
+		},
+
+		set: function(config, section, option, value) {
+			if (!exists(this._configs, config))
+				this.load(config);
+
+			let cfg = this._configs[config];
+
+			if (value == null) {
+				cfg[section] = { '.name': section, '.type': option, '.anonymous': false, '.index': length(keys(cfg)) };
+				return true;
+			}
+
+			cfg[section][option] = type(value) == 'array' ? map(value, v => '' + v) : '' + value;
+			return true;
+		},
+
+		delete: function(config, section, option) {
+			let cfg = this._configs[config];
+
+			if (option)
+				delete cfg[section][option];
+			else {
+				delete cfg[section];
+				this._reindex(config, this._sorted(config));
+			}
+
+			return true;
+		},
+
+		reorder: function(config, section, index) {
+			let order = filter(this._sorted(config), sid => sid != section);
+
+			splice(order, index, 0, section);
+			this._reindex(config, order);
+
+			return true;
+		},
+
+		save: function(config) {
+			return true;
+		},
+
+		commit: function(config) {
+			mocklib.uci_store[config] = this._configs[config];
+
+			return true;
+		},
+
 		foreach: function(config, stype, cb) {
 			let rv = false;
+
+			if (!exists(this._configs, config))
+				this.load(config);
 
 			if (exists(this._configs, config)) {
 				let cfg = this._configs[config],

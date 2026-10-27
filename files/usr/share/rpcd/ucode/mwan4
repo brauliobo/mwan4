@@ -5,12 +5,21 @@
 // Based on original mwan3 by Florian Eckert <fe@dev.tdt.de>
 
 import m from '/lib/mwan4/mwan4.uc';
+import importer from '/lib/mwan4/pbr_import.uc';
 
 m.set_scriptname('rpcd-mwan4');
 m.init();
 
 function rpc_args(request) {
 	return request?.args || {};
+}
+
+// rpcd keeps this script loaded, so every call must re-read UCI.
+function fresh(handler) {
+	return request => {
+		m.reload();
+		return handler(request);
+	};
 }
 
 function status_call(request) {
@@ -41,27 +50,31 @@ function advanced_control_call(request) {
 	return m.advanced_control(rpc_args(request));
 }
 
+function pbr_import_call(request) {
+	return importer.pbr_import(rpc_args(request));
+}
+
 const methods = {
 	status:       {
 		args: {
 			section:   'section',
 			interface: 'interface',
 		},
-		call: status_call,
+		call: fresh(status_call),
 	},
 	counters:     {
 		args: {},
-		call: counters_call,
+		call: fresh(counters_call),
 	},
 	capabilities: {
 		args: {},
-		call: capabilities_call,
+		call: fresh(capabilities_call),
 	},
 	validate:     {
 		args: {
 			section: 'section',
 		},
-		call: validate_call,
+		call: fresh(validate_call),
 	},
 	diagnostics:  {
 		args: {
@@ -77,14 +90,14 @@ const methods = {
 			ipset:     'ipset',
 			strategy:  'strategy',
 		},
-		call: diagnostics_call,
+		call: fresh(diagnostics_call),
 	},
 	control:      {
 		args: {
 			action:    'action',
 			interface: 'interface',
 		},
-		call: control_call,
+		call: fresh(control_call),
 	},
 	advanced_control: {
 		args: {
@@ -92,7 +105,13 @@ const methods = {
 			interface: 'interface',
 			feature:   'feature',
 		},
-		call: advanced_control_call,
+		call: fresh(advanced_control_call),
+	},
+	pbr_import:   {
+		args: {
+			apply: false,
+		},
+		call: fresh(pbr_import_call),
 	},
 };
 

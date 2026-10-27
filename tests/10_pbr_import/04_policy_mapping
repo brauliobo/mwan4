@@ -1,0 +1,111 @@
+Testing pbr policy token classification, protocol/port fan-out, targets and skip reasons.
+
+-- File uci/pbr.json --
+{
+	"pbr": [
+		{ ".name": "config", "ignored_interface": ["wg_ign"], "supported_interface": ["wg0", "wg_ign"] }
+	],
+	"policy": [
+		{ "name": "mac host", "src_addr": "AA:BB:CC:DD:EE:FF 192.168.1.5 @lan", "interface": "wan" },
+		{ "name": "out dns", "chain": "output", "dest_addr": "9.9.9.9", "dest_port": "53", "proto": "tcp udp icmp", "interface": "wan" },
+		{ "name": "bypass", "dest_addr": "Local.Example.com", "interface": "ignore" },
+		{ "name": "to strategy", "dest_addr": "10.5.0.0/16", "interface": "mwan4_strategy_custom" },
+		{ "name": "v6 net", "dest_addr": "2001:db8::/32,fd00::/8", "interface": "wan6" },
+		{ "name": "negated", "dest_addr": "!example.com", "interface": "wan" },
+		{ "name": "ghost", "dest_addr": "example.com", "interface": "nonexistent" },
+		{ "name": "ignored", "dest_addr": "example.com", "interface": "wg_ign" },
+		{ "name": "empty", "interface": "wan" },
+		{ "name": "discord", "dest_addr": "discord.com", "interface": "wg0" },
+		{ "name": "ports", "dest_port": "80 443,8080-8090", "interface": "wan" },
+		{ "name": "badport", "dest_port": "99999", "interface": "wan" },
+		{ "name": "badproto", "dest_addr": "example.com", "proto": "tcp; flush", "interface": "wan" },
+		{ "name": "off", "dest_addr": "off.example.com", "interface": "wg0", "enabled": "0" },
+		{ "dest_addr": "unnamed.example.com", "interface": "wan" },
+		{ "name": "wan dns", "dest_addr": "ntp.example.com", "interface": "wan_tim" }
+	]
+}
+-- End --
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"], "track_ip": ["1.1.1.1"] },
+		{ ".name": "wan6", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv6"], "track_ip": ["2606:4700:4700::1111"] }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wan6_r", "interface": "wan6", "metric": "1", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "custom", "use_route": ["wan_r"] }
+	],
+	"rule": [
+		{ ".name": "discord", "dest_port": "443", "proto": "tcp", "use_strategy": "custom" },
+		{ ".name": "default_rule_v4", "dest_ip": "0.0.0.0/0", "use_strategy": "custom", "family": ["ipv4"] },
+		{ ".name": "default_rule_v6", "dest_ip": "::/0", "use_strategy": "custom", "family": ["ipv6"] }
+	]
+}
+-- End --
+
+-- File uci/network.json --
+{
+	"interface": [
+		{ ".name": "lan", "proto": "static" },
+		{ ".name": "wan", "proto": "dhcp" },
+		{ ".name": "wan6", "proto": "dhcpv6" },
+		{ ".name": "wan_tim", "proto": "dhcp" },
+		{ ".name": "wg0", "proto": "wireguard", "addresses": ["10.9.0.2/32", "fd00::2/128"], "dns": ["10.9.0.1"] },
+		{ ".name": "wg_ign", "proto": "wireguard", "addresses": ["10.8.0.2/32"] }
+	],
+	"wireguard_wg0": [
+		{ "allowed_ips": ["0.0.0.0/0", "fd00::1/128", "10.9.0.1/32"] }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+import importer from 'pbr_import';
+
+m.set_scriptname('test');
+m.init();
+
+let result = importer.pbr_import({});
+for (let p in result.policies) {
+	printf('%s: %s %s\n', p.name, p.action, p.action == 'skip' ? p.reason : join(',', p.rules) + ' -> ' + p.strategy);
+	if (p.summary) printf('  %s\n', p.summary);
+}
+print('interfaces: ' + join(',', result.interfaces) + '\n');
+print('strategies: ' + join(',', result.strategies) + '\n');
+-- End --
+
+-- Expect stdout --
+mac host: import mac_host_1,mac_host_2,mac_host_3 -> wan_first
+  src_ip=192.168.1.5 -> wan_first; src_mac=aa:bb:cc:dd:ee:ff -> wan_first; src_iface=lan -> wan_first
+out dns: import out_dns_1,out_dns_2,out_dns_3 -> wan_first
+  dest_ip=9.9.9.9 proto=tcp dest_port=53 -> wan_first; dest_ip=9.9.9.9 proto=udp dest_port=53 -> wan_first; dest_ip=9.9.9.9 proto=icmp -> wan_first
+bypass: import bypass -> default
+  domain=local.example.com -> default
+to strategy: import to_strategy -> custom
+  dest_ip=10.5.0.0/16 -> custom
+v6 net: import v6_net -> wan_first
+  dest_ip=2001:db8::/32,fd00::/8 -> wan_first
+negated: skip unsupported address '!example.com'
+ghost: skip interface 'nonexistent' is unknown to netifd and mwan4
+ignored: skip interface 'wg_ign' is ignored in pbr
+empty: skip policy matches all traffic
+discord: import discord_2 -> wg0_only
+  domain=discord.com -> wg0_only
+ports: import ports_1,ports_2 -> wan_first
+  proto=tcp dest_port=80,443,8080-8090 -> wan_first; proto=udp dest_port=80,443,8080-8090 -> wan_first
+badport: skip unsupported dest_port '99999'
+badproto: skip unsupported protocol 'flush'
+off: import off -> wg0_only
+  domain=off.example.com -> wg0_only
+unnamed.example.com: import unnamed_exa -> wan_first
+  domain=unnamed.example.com -> wan_first
+wan dns: skip interface 'wan_tim' (dhcp) is not an mwan4 WAN or tunnel
+interfaces: wg0
+strategies: wan_first,wg0_only
+-- End --
