@@ -10,8 +10,8 @@ import { unlink, writefile, stat } from 'fs';
 const STATE_DIR = '/var/run/mwan4';
 const FLUSH_DIR = STATE_DIR + '/flush';
 
-// Flows without a reply (UNSET = SEEN_REPLY clear, conntrack(8)): nothing came back through the WAN, so they cannot be healthy.
-const DEAD_FLOWS = ['-u UNSET', '-p tcp --state SYN_SENT', '-p tcp --state SYN_RECV'];
+// Flows without a reply (conntrack -u UNREPLIED: no reply seen yet): nothing came back through the WAN, so they cannot be healthy.
+const DEAD_FLOWS = ['-u UNREPLIED', '-p tcp --state SYN_SENT', '-p tcp --state SYN_RECV'];
 
 function conntrack_delete(mark, mask, filter_args) {
 	return sprintf('conntrack -D --mark %s/%s%s 2>/dev/null', mark, mask, filter_args ? ' ' + filter_args : '');

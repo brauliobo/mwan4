@@ -49,19 +49,19 @@ trigger('wanc without flush_conntrack', 'wanc', 'disconnected', 'offline');
 
 -- Expect stdout --
 -- wan disconnected (4 commands)
-conntrack -D --mark 0x100/0x3f00 -u UNSET 2>/dev/null
+conntrack -D --mark 0x100/0x3f00 -u UNREPLIED 2>/dev/null
 conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_SENT 2>/dev/null
 conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_RECV 2>/dev/null
 (flock -n 9 || exit 0; while [ -f /var/run/mwan4/flush/wan.deadline ]; do d=$(cat /var/run/mwan4/flush/wan.deadline); n=$(date +%s); [ $n -ge $d ] || { sleep $((d - n)); continue; }; rm -f /var/run/mwan4/flush/wan.deadline; [ "$(cat /var/run/mwan4/iface_state/wan 2>/dev/null)" = online ] || conntrack -D --mark 0x100/0x3f00 2>/dev/null; done) 9>/var/run/mwan4/flush/wan.lock </dev/null >/dev/null 2>&1 1000>&- &
 deadline file: 1000010
 -- second flap supersedes: same job, later deadline (4 commands)
-conntrack -D --mark 0x100/0x3f00 -u UNSET 2>/dev/null
+conntrack -D --mark 0x100/0x3f00 -u UNREPLIED 2>/dev/null
 conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_SENT 2>/dev/null
 conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_RECV 2>/dev/null
 (flock -n 9 || exit 0; while [ -f /var/run/mwan4/flush/wan.deadline ]; do d=$(cat /var/run/mwan4/flush/wan.deadline); n=$(date +%s); [ $n -ge $d ] || { sleep $((d - n)); continue; }; rm -f /var/run/mwan4/flush/wan.deadline; [ "$(cat /var/run/mwan4/iface_state/wan 2>/dev/null)" = online ] || conntrack -D --mark 0x100/0x3f00 2>/dev/null; done) 9>/var/run/mwan4/flush/wan.lock </dev/null >/dev/null 2>&1 1000>&- &
 deadline file: 1000014
 -- wan recovered, trigger connected (3 commands)
-conntrack -D --mark 0x100/0x3f00 -u UNSET 2>/dev/null
+conntrack -D --mark 0x100/0x3f00 -u UNREPLIED 2>/dev/null
 conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_SENT 2>/dev/null
 conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_RECV 2>/dev/null
 deadline cancelled: true
