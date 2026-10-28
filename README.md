@@ -112,22 +112,22 @@ DSL that drops three times in ten minutes is held out for five minutes of stable
 ```json
 {
   "health_state": "held",
-  "flaps": { "count_window": 3, "total": 7 },
-  "availability": { "pct_1h": 91.7, "pct_24h": 98.2 },
+  "flaps": { "count_window": 3, "window": 300, "total": 7 },
+  "availability": { "pct_1h": 91.7, "observed_1h": 3600, "pct_24h": 98.2, "observed_24h": 15900 },
   "held": { "active": true, "reason": "flapping", "until": 1793188400, "remaining": 87 },
   "degraded_for": ["voice"]
 }
 ```
 
-`flaps.total` and `availability` come from the transition log, `/var/run/mwan4/history/<iface>` (one `epoch state reason` line per event, the last 200 kept, replaced atomically; it survives `mwan4 reload`, `restart` and `stop`/`start` but not a reboot). States are `online` (`start`, `recovered`), `offline` (`probe`, `ifdown`), `held` (`flapping`, `recovering`), `released`, `degraded` (strategy names) and `restored`; availability counts `held` as up. `ubus call mwan4 link_history '{"interface":"wan","since":1793180000,"limit":50}'` (all arguments optional, `limit` at most 200) returns the events oldest first:
+`flaps.total` and `availability` come from the transition log, `/var/run/mwan4/history/<iface>` (one `epoch state reason` line per event, the last 200 kept, replaced atomically; it survives `mwan4 reload`, `restart` and `stop`/`start` but not a reboot). States are `online` (`start`, `recovered`), `offline` (`probe`, `ifdown`), `held` (`flapping`, `recovering`), `released`, `degraded` (strategy names) and `restored`; availability counts `held` as up. `observed_*` is how many seconds of the 1 h / 24 h window the log covers: the percentage is measured over that span only, so `pct_24h` with `observed_24h` 15900 means 98.2% of the last 4h25m, not of a full day. `ubus call mwan4 link_history '{"interface":"wan","since":1793180000,"limit":50}'` (all arguments optional, `limit` at most 200) returns the events oldest first:
 
 ```json
 { "ok": true, "interfaces": { "wan": {
   "events": [{ "time": 1793188300, "state": "offline", "reason": "probe" },
              { "time": 1793188313, "state": "online", "reason": "recovered" },
              { "time": 1793188313, "state": "held", "reason": "flapping" }],
-  "flaps": { "count_window": 3, "total": 7 },
-  "availability": { "pct_1h": 91.7, "pct_24h": 98.2 },
+  "flaps": { "count_window": 3, "window": 300, "total": 7 },
+  "availability": { "pct_1h": 91.7, "observed_1h": 3600, "pct_24h": 98.2, "observed_24h": 15900 },
   "held": { "active": true, "reason": "flapping", "until": 1793188400, "remaining": 87 },
   "degraded_for": [] } } }
 ```

@@ -40,7 +40,7 @@ flap 3 held: false
 flap 4 held: false
 flap 5 held: false
 flap 6 held: false
-flaps counted: { "count_window": 6, "total": 6 }
+flaps counted: { "count_window": 6, "window": 300, "total": 6 }
 rm -rf '/var/run/mwan4.history'; mv '/var/run/mwan4/history' '/var/run/mwan4.history' 2>/dev/null
 [ -d '/var/run/mwan4.history' ] && mv '/var/run/mwan4.history' '/var/run/mwan4/history'
 -- End --

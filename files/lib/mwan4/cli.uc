@@ -5,6 +5,7 @@
 
 import { popen, readfile } from 'fs';
 import m from 'mwan4';
+import stability from 'stability';
 
 function println(s) { print(s + '\n'); }
 
@@ -96,14 +97,11 @@ function format_time(epoch) {
 	return sprintf('%04d-%02d-%02d %02d:%02d:%02d', t.year, t.mon, t.mday, t.hour, t.min, t.sec);
 }
 
-function percent(value) {
-	return value == null ? 'n/a' : value + '%';
-}
-
 function history_header(name, data) {
 	let held = data.held.active ? sprintf(', held (%s, %ds left)', data.held.reason, data.held.remaining) : '';
-	return sprintf('%s: %d flaps in window (%d total), availability 1h %s, 24h %s%s', name, data.flaps.count_window, data.flaps.total,
-		percent(data.availability.pct_1h), percent(data.availability.pct_24h), held);
+	let av = data.availability;
+	return sprintf('%s: %d flaps in the last %ds (%d total), availability %s, %s%s', name, data.flaps.count_window, data.flaps.window, data.flaps.total,
+		stability.availability_text(av.pct_24h, av.observed_24h, 86400), stability.availability_text(av.pct_1h, av.observed_1h, 3600), held);
 }
 
 function cmd_history(args) {

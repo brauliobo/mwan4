@@ -110,7 +110,7 @@ threshold=2 window=300 holddown=60 damping=true
 flap_damping 0 never holds:
 hold with damping: flapping
 hold without damping: null
-flaps: { "count_window": 1, "total": 5 }
+flaps: { "count_window": 1, "window": 300, "total": 5 }
 log:
 1000000 online start
 1000000 offline probe

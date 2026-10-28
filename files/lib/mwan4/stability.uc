@@ -103,11 +103,11 @@ function history_append(iface, state, reason, now) {
 
 function history_flaps(events, window, now) {
 	let offline = filter(events, e => e.state == 'offline');
-	return { count_window: length(filter(offline, e => e.time > now - window)), total: length(offline) };
+	return { count_window: length(filter(offline, e => e.time > now - window)), window, total: length(offline) };
 }
 
-// Percentage of [from, to] the link was online, bounded to what the log covers.
-function uptime_percent(events, from, to) {
+// Percentage of [from, to] the link was online and the seconds of that span the log covers.
+function uptime_stats(events, from, to) {
 	let changes = filter(events, e => e.state == 'online' || e.state == 'offline');
 	if (!length(changes)) return null;
 
@@ -123,11 +123,26 @@ function uptime_percent(events, from, to) {
 		current = e.state;
 	}
 	if (current == 'online') up += to - since;
-	return int(up * 1000.0 / (to - start) + 0.5) / 10.0;
+	return { pct: int(up * 1000.0 / (to - start) + 0.5) / 10.0, observed: to - start };
 }
 
+// A percentage is only meaningful with the span it was measured over: a log shorter than the window covers less of it.
 function availability(events, now) {
-	return { pct_1h: uptime_percent(events, now - 3600, now), pct_24h: uptime_percent(events, now - 86400, now) };
+	let hour = uptime_stats(events, now - 3600, now), day = uptime_stats(events, now - 86400, now);
+	return { pct_1h: hour?.pct, observed_1h: hour?.observed, pct_24h: day?.pct, observed_24h: day?.observed };
+}
+
+function duration_text(seconds) {
+	if (seconds < 120) return seconds + 's';
+	if (seconds < 7200) return int(seconds / 60) + 'm';
+	if (seconds < 172800) return int(seconds / 3600) + 'h' + (seconds % 3600 >= 60 ? sprintf('%02dm', int(seconds % 3600 / 60)) : '');
+	return int(seconds / 86400) + 'd';
+}
+
+// "99.2% over 24h", or "23.1% over the last 4h25m" while the log is shorter than the window.
+function availability_text(pct, observed, window) {
+	if (pct == null) return 'n/a';
+	return sprintf('%.1f%% over %s', pct, observed >= window ? duration_text(window) : 'the last ' + duration_text(observed));
 }
 
 // ── Holds ────────────────────────────────────────────────────────────
@@ -285,6 +300,7 @@ export default {
 	history_append,
 	history_flaps,
 	availability,
+	availability_text,
 	held_info,
 	hold_expired,
 	hold_for,

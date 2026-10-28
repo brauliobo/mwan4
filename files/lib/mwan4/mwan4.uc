@@ -1819,8 +1819,8 @@ function stability_note(iface) {
 	let notes = [];
 	if (data.held.active) push(notes, sprintf('held (%s, %ds left)', data.held.reason, data.held.remaining));
 	if (length(data.degraded_for)) push(notes, 'degraded for ' + join(',', data.degraded_for));
-	if (data.flaps.count_window) push(notes, sprintf('%d flaps in %ds', data.flaps.count_window, stability_opts(iface).flap_window));
-	if (data.availability.pct_24h != null && data.availability.pct_24h < 100) push(notes, sprintf('availability 24h %.1f%%', data.availability.pct_24h));
+	if (data.flaps.count_window) push(notes, sprintf('%d flaps in the last %ds', data.flaps.count_window, data.flaps.window));
+	if (data.availability.pct_24h != null && data.availability.pct_24h < 100) push(notes, 'availability ' + stability.availability_text(data.availability.pct_24h, data.availability.observed_24h, 86400));
 	return length(notes) ? ', ' + join(', ', notes) : '';
 }
 

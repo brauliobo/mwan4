@@ -75,10 +75,10 @@ for (let line in m.report_iface_status())
 -- Expect stdout --
 wan health_state: held status: unknown
 wan held: { "active": true, "reason": "recovering", "until": 1000230, "remaining": 10 }
-wan flaps: { "count_window": 1, "total": 1 }
-wan availability: { "pct_1h": 54.5, "pct_24h": 54.5 }
+wan flaps: { "count_window": 1, "window": 600, "total": 1 }
+wan availability: { "pct_1h": 54.5, "observed_1h": 220, "pct_24h": 54.5, "observed_24h": 220 }
 wan degraded_for: [ "fast" ]
-wanb flaps: { "count_window": 0, "total": 0 } held: false degraded_for: [ ]
+wanb flaps: { "count_window": 0, "window": 300, "total": 0 } held: false degraded_for: [ ]
 
 link_history method: yes
 ok: true interfaces: wan,wanb
@@ -95,6 +95,6 @@ unknown interface: { "ok": true, "interfaces": { } }
 capabilities: link_history=true defaults={ "flap_damping": 1, "flap_threshold": 3, "flap_window": 300, "flap_holddown": 120, "recovery_hold": 30, "flush_grace": 10, "quality_hold": 30 }
 
 interfaces report:
-wan: 0 active connections, held (recovering, 10s left), degraded for fast, 1 flaps in 600s, availability 24h 54.5%
+wan: 0 active connections, held (recovering, 10s left), degraded for fast, 1 flaps in the last 600s, availability 54.5% over the last 3m
 wanb: 0 active connections
 -- End --

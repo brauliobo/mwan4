@@ -28,6 +28,8 @@ let avail = stability.availability(events, T + 1800);
 print('availability 1h: ' + avail.pct_1h + ' 24h: ' + avail.pct_24h + '\n');
 print('availability once the outage left the hour: ' + stability.availability(events, T + 4600).pct_1h + '\n');
 print('availability without data: ' + stability.availability([], T).pct_24h + '\n');
+print('covered by the log: ' + avail.observed_1h + 's of 3600, ' + avail.observed_24h + 's of 86400\n');
+print('text: ' + stability.availability_text(avail.pct_24h, avail.observed_24h, 86400) + ' | ' + stability.availability_text(100, 90000, 86400) + ' | ' + stability.availability_text(99.2, 16500, 86400) + ' | ' + stability.availability_text(null, null, 86400) + '\n');
 
 for (let i = 0; i < 300; i++)
 	stability.history_append('flappy', i % 2 ? 'online' : 'offline', 'probe', T + i);
@@ -49,5 +51,7 @@ flaps window 300 at T+2000: 0/1
 availability 1h: 83.3 24h: 83.3
 availability once the outage left the hour: 100
 availability without data: null
+covered by the log: 1800s of 3600, 1800s of 86400
+text: 83.3% over the last 30m | 100.0% over 24h | 99.2% over the last 4h35m | n/a
 bounded: 200 oldest=100 newest=299
 -- End --
