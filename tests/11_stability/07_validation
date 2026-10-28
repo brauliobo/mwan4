@@ -1,0 +1,57 @@
+Testing validation of the stability options, the quality limits, single track targets and quality steering without check_quality.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00", "flap_threshold": "1", "flap_window": "10", "flush_grace": "x" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"], "track_ip": ["1.1.1.1"], "flap_damping": "maybe", "flap_holddown": "-1", "recovery_hold": "99999999", "quality_hold": "5" },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"], "track_ip": ["1.1.1.1", "8.8.8.8"], "check_quality": "1", "flap_damping": "0", "flap_threshold": "2", "flap_window": "30", "flap_holddown": "0", "recovery_hold": "0", "flush_grace": "0" },
+		{ ".name": "wanc", "enabled": "0", "id": "3", "table_id": "3", "mark": "0x300", "family": ["ipv4"], "track_ip": ["1.1.1.1"] }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wanb_r", "interface": "wanb", "metric": "2", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "bad_latency", "use_route": ["wanb_r"], "max_latency": "0" },
+		{ ".name": "bad_loss", "use_route": ["wanb_r"], "max_loss": "101" },
+		{ ".name": "unmeasured", "use_route": ["wan_r", "wanb_r"], "max_latency": "150", "max_loss": "0" },
+		{ ".name": "measured", "use_route": ["wanb_r"], "max_latency": "150", "max_loss": "100" },
+		{ ".name": "plain", "use_route": ["wan_r"] }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+
+let validation = m.validate_config();
+print('valid: ' + validation.valid + '\n');
+for (let e in validation.errors)
+	print('error ' + e.code + ' ' + e.section + ': ' + e.message + '\n');
+for (let w in validation.warnings)
+	print('warning ' + w.code + ' ' + (w.section ?? '-') + ': ' + w.message + '\n');
+
+let wan = m.stability_opts('wan'), wanb = m.stability_opts('wanb');
+print(sprintf('\nwan (invalid values fall back to the global/default): %J\n', wan));
+print(sprintf('wanb: %J\n', wanb));
+-- End --
+
+-- Expect stdout --
+valid: false
+error invalidFlapThreshold globals: 'globals' option flap_threshold '1' must be 2-1000.
+error invalidFlapWindow globals: 'globals' option flap_window '10' must be 30-86400.
+error invalidFlushGrace globals: 'globals' option flush_grace 'x' must be 0-3600.
+error invalidFlapDamping wan: 'wan' option flap_damping 'maybe' must be 0 or 1.
+error invalidFlapHolddown wan: 'wan' option flap_holddown '-1' must be 0-86400.
+error invalidRecoveryHold wan: 'wan' option recovery_hold '99999999' must be 0-86400.
+error invalidMaxLatency bad_latency: Strategy 'bad_latency' max_latency '0' must be a positive number of milliseconds.
+error invalidMaxLoss bad_loss: Strategy 'bad_loss' max_loss '101' must be 0-100.
+warning singleTrackTarget wan: Interface 'wan' has a single track_ip; one lost probe takes the link down. Use at least two targets.
+warning qualityNeedsCheckQuality unmeasured: Strategy 'unmeasured' limits quality but wan has no check_quality '1', so it is never steered.
+
+wan (invalid values fall back to the global/default): { "flap_damping": true, "flap_threshold": 3, "flap_window": 300, "flap_holddown": 120, "recovery_hold": 30, "flush_grace": 10, "quality_hold": 5 }
+wanb: { "flap_damping": false, "flap_threshold": 2, "flap_window": 30, "flap_holddown": 0, "recovery_hold": 0, "flush_grace": 0, "quality_hold": 30 }
+-- End --

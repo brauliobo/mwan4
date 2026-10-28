@@ -18,6 +18,94 @@ The diagnostic only reports state. It does not change configuration, start servi
 
 OpenWrt package for the nftables-based `mwan4` service.
 
+## Unstable WAN handling
+
+A flaky WAN used to flap between online and offline every few seconds, each flap reloading the firewall and flushing every flow on that WAN, and a recovered preferred WAN pulled traffic back at once. These options keep such a link from disturbing the others. All of them live in `config globals` as defaults and can be overridden in an `interface` section with the same name; legacy behaviour is `flap_damping '0'`, `recovery_hold '0'` and `flush_grace '0'`.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `flap_damping` | `1` | Hold a link out of the strategies while it flaps. |
+| `flap_threshold` | `3` | Online to offline transitions inside `flap_window` that count as flapping (at least 2). |
+| `flap_window` | `300` | Seconds the flaps are counted over (at least 30). |
+| `flap_holddown` | `120` | Seconds a flapping link must stay healthy before it rejoins. |
+| `recovery_hold` | `30` | Seconds a recovered link must stay healthy before it rejoins; `0` disables. |
+| `flush_grace` | `10` | Seconds an offline WAN keeps its established flows (see below); `0` flushes at once. |
+| `quality_hold` | `30` | Seconds a degraded link must stay under 80% of the limits before it is used again. |
+| strategy `max_latency` | unset | Milliseconds; links measured slower are skipped by that strategy. |
+| strategy `max_loss` | unset | Percent (0-100); links losing more are skipped by that strategy. |
+
+Invalid values are reported by `validate` and ignored at runtime (the global, then the default, applies).
+
+- **Holds.** A link that is held stays `online` for the tracker but is left out of the strategies (`health_state` `held`, reason `flapping` or `recovering`). The hold only starts for a recovery (offline to online) after mwan4 is running: a link that is healthy when mwan4 starts or restarts joins at once, and so does one that is validated for the first time after `initial_state 'offline'`. A failure during a hold drops it, and the next recovery starts a new one. Established connections are never moved by a failback, only new ones follow. Flapping outranks the recovery hold.
+- **Last usable link.** Holds and quality skips never empty a strategy: when every online route of a strategy is held the holds are lifted for it, and when every candidate is degraded the least bad one stays. Strategies are only rebuilt when the set really changes.
+- **Selective flush.** The `flush_conntrack` triggers (`ifup`, `ifdown`, `connected`, `disconnected`) no longer drop every flow of the WAN at once. Flows without a reply (`conntrack -D -m <mark>/<mask> -u UNSET`, TCP `SYN_SENT` and `SYN_RECV`) go immediately; after `flush_grace` seconds a detached job (it does not hold the hotplug lock) deletes the remaining flows of that WAN only if it is still offline. A recovery cancels the job, a repeated trigger only moves its deadline.
+- **Quality steering.** With `option check_quality '1'` on the interface the tracker keeps a moving average of the last three checks (latency over the probes that answered, loss over all probes). A strategy with `max_latency` or `max_loss` skips a link whose average is above a limit (`degraded_for` in the status, the link stays `online` for every other strategy) and takes it back after `quality_hold` seconds below 80% of the limits. Loss is only fine grained with `count` above 1 per check. `validate` warns with `qualityNeedsCheckQuality` when a limit is set over a link without `check_quality`.
+- **Probes.** The default config tracks two targets per interface (`1.1.1.1`, `8.8.8.8` and their IPv6 counterparts) with `reliability '1'`: the link is up while any target answers, so one lost probe or one dead target no longer flaps it. `validate` warns with `singleTrackTarget` for an enabled interface with a single `track_ip`.
+
+Worked example, an unstable DSL primary with LTE as backup:
+
+```
+config globals 'globals'
+	option flap_threshold '3'
+	option flap_window '600'
+	option flap_holddown '300'
+	option recovery_hold '60'
+
+config interface 'dsl'
+	option enabled '1'
+	list track_ip '1.1.1.1'
+	list track_ip '8.8.8.8'
+	option reliability '1'
+	option count '3'
+	option check_quality '1'
+	list flush_conntrack 'disconnected'
+
+config route 'dsl_m1'
+	option interface 'dsl'
+	option metric '1'
+
+config route 'lte_m2'
+	option interface 'lte'
+	option metric '2'
+
+config strategy 'voice'
+	list use_route 'dsl_m1'
+	list use_route 'lte_m2'
+	option max_latency '150'
+	option max_loss '3'
+```
+
+DSL that drops three times in ten minutes is held out for five minutes of stable operation, a DSL that is back after one outage waits 60 seconds before new connections use it again, and calls started through `voice` leave DSL while it measures above 150 ms or 3% loss. When DSL goes offline its dead flows go at once and its remaining ones after 10 seconds, unless it comes back first.
+
+### Status and history
+
+`ubus call mwan4 status '{"section":"interfaces"}'` adds to every interface:
+
+```json
+{
+  "health_state": "held",
+  "flaps": { "count_window": 3, "total": 7 },
+  "availability": { "pct_1h": 91.7, "pct_24h": 98.2 },
+  "held": { "active": true, "reason": "flapping", "until": 1793188400, "remaining": 87 },
+  "degraded_for": ["voice"]
+}
+```
+
+`flaps.total` and `availability` come from the transition log, `/var/run/mwan4/history/<iface>` (one `epoch state reason` line per event, the last 200 kept, replaced atomically; it survives `mwan4 reload`/`restart` but not a reboot). States are `online` (`start`, `recovered`), `offline` (`probe`, `ifdown`), `held` (`flapping`, `recovering`), `released`, `degraded` (strategy names) and `restored`; availability counts `held` as up. `ubus call mwan4 link_history '{"interface":"wan","since":1793180000,"limit":50}'` (all arguments optional, `limit` at most 200) returns the events oldest first:
+
+```json
+{ "ok": true, "interfaces": { "wan": {
+  "events": [{ "time": 1793188300, "state": "offline", "reason": "probe" },
+             { "time": 1793188313, "state": "online", "reason": "recovered" },
+             { "time": 1793188313, "state": "held", "reason": "flapping" }],
+  "flaps": { "count_window": 3, "total": 7 },
+  "availability": { "pct_1h": 91.7, "pct_24h": 98.2 },
+  "held": { "active": true, "reason": "flapping", "until": 1793188400, "remaining": 87 },
+  "degraded_for": [] } } }
+```
+
+`capabilities` reports `stability.link_history` and the built-in defaults. CLI: `mwan4 history [iface]` prints the events, `mwan4 interfaces` appends hold, degradation, flap and availability notes.
+
 ## Rules
 
 `config rule` sections are evaluated top to bottom in `/etc/config/mwan4` (first match wins). The generated `default_rule_v4` / `default_rule_v6` catch-alls always run last, wherever they sit in the file.

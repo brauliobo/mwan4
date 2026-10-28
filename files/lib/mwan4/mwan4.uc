@@ -4363,6 +4363,28 @@ function validate_rule_ids(report) {
 		report.warning('ruleIdCapacity', null, sprintf('%d rules but rule_mask %s holds only %d rule ids; the others are not tracked per rule.', length(sections), mwan4.rule_mask, rule_capacity()));
 }
 
+function camel_case(name) {
+	return join('', map(split(name, '_'), word => uc(substr(word, 0, 1)) + substr(word, 1)));
+}
+
+// Stability options exist on globals and on every interface with the same names and ranges.
+function validate_stability_options(name, section, error) {
+	if (section.flap_damping != null && !valid_stability_value('flap_damping', section.flap_damping))
+		error('invalidFlapDamping', name, sprintf("'%s' option flap_damping '%s' must be 0 or 1.", name, section.flap_damping));
+	for (let option, range in stability.RANGES) {
+		if (section[option] != null && !validate_uint_range(section[option], range[0], range[1]))
+			error('invalid' + camel_case(option), name,
+				sprintf("'%s' option %s '%s' must be %d-%d.", name, option, section[option], range[0], range[1]));
+	}
+}
+
+function validate_quality_limits(name, section, error) {
+	if (section.max_latency != null && !validate_uint_range(section.max_latency, 1, 4294967295))
+		error('invalidMaxLatency', name, sprintf("Strategy '%s' max_latency '%s' must be a positive number of milliseconds.", name, section.max_latency));
+	if (section.max_loss != null && !validate_uint_range(section.max_loss, 0, 100))
+		error('invalidMaxLoss', name, sprintf("Strategy '%s' max_loss '%s' must be 0-100.", name, section.max_loss));
+}
+
 function validate_config() {
 	_ensure_init();
 
@@ -4398,9 +4420,15 @@ function validate_config() {
 	if (mmx_mask == null || mmx_mask <= 0)
 		validation_error('invalidMarkMask', 'globals', sprintf("Firewall mark mask '%s' is invalid.", mwan4.mmx_mask || ''));
 
+	validate_stability_options('globals', uci_section_map('globals').globals || {}, validation_error);
+
 	uci_foreach('interface', function(s) {
 		let name = s['.name'];
 		ordinal++;
+		validate_stability_options(name, s, validation_error);
+		if (uci_bool(s.enabled) && length(as_list(s.track_ip)) == 1)
+			validation_warning('singleTrackTarget', name,
+				sprintf("Interface '%s' has a single track_ip; one lost probe takes the link down. Use at least two targets.", name));
 		let id = parse_uint_number(s.id);
 		let table_id = parse_uint_number(s.table_id);
 		let mark = parse_mark_number(s.mark);
@@ -4515,6 +4543,14 @@ function validate_config() {
 		if (s.last_resort && s.last_resort != 'default' && s.last_resort != 'unreachable' && s.last_resort != 'blackhole')
 			validation_error('invalidStrategyLastResort', name,
 				sprintf("Strategy '%s' has unsupported last_resort '%s'.", name, s.last_resort));
+
+		validate_quality_limits(name, s, validation_error);
+		if (s.max_latency != null || s.max_loss != null) {
+			let unmeasured = filter(map(as_list(s.use_route), r => routes[r]?.interface), i => interfaces[i] && !uci_bool(interfaces[i].check_quality));
+			if (length(unmeasured))
+				validation_warning('qualityNeedsCheckQuality', name,
+					sprintf("Strategy '%s' limits quality but %s has no check_quality '1', so it is never steered.", name, join(', ', uniq(unmeasured))));
+		}
 	});
 
 	let builtin_strategies = {
