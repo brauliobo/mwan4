@@ -77,9 +77,9 @@ table inet fw4 {
 	}
 
 	chain mwan4_iface_in_wan_ipv4 {
-		iifname "eth0" ip saddr @mwan4_custom_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_custom_default meta mark set 0x3f00 comment "default"
-		iifname "eth0" ip saddr @mwan4_connected_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_connected_default meta mark set 0x3f00 comment "default"
-		iifname "eth0" ip saddr @mwan4_dynamic_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_dynamic_default meta mark set 0x3f00 comment "default"
+		iifname "eth0" ip saddr @mwan4_custom_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_custom_default meta mark set 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00 comment "default"
+		iifname "eth0" ip saddr @mwan4_connected_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_connected_default meta mark set 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00 comment "default"
+		iifname "eth0" ip saddr @mwan4_dynamic_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_dynamic_default meta mark set 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00 comment "default"
 		iifname "eth0" meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4 meta mark set 0x900 comment "wan"
 	}
 

@@ -47,7 +47,7 @@ mwan4_rules_ipv4:
 		meta l4proto tcp tcp dport { 5 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_sticky5_ipv4
 		meta l4proto tcp tcp dport { 5 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_sticky5_ipv4 jump mwan4_rule_sticky5_ipv4 comment "sticky5"
 		meta l4proto udp udp dport { 15 } meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_last15_ipv4
-		meta l4proto udp udp dport { 15 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_last15_ipv4 meta mark set 0x3f00 comment "last15"
+		meta l4proto udp udp dport { 15 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_last15_ipv4 meta mark set 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00 comment "last15"
 		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 ct state new counter name mwan4_counter_conn_default_rule_v4_ipv4
 		ip daddr 0.0.0.0/0 meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_default_rule_v4_ipv4 jump mwan4_strategy_solo_ipv4 comment "default_rule_v4"
 mwan4_rules_out_ipv4:

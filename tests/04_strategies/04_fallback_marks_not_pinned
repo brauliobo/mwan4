@@ -1,0 +1,90 @@
+Testing that fallback marks (all routes offline) never reach the conntrack mark, while WAN marks and lasting default marks do.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"] }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wanb_r", "interface": "wanb", "metric": "2", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "failover", "use_route": ["wan_r", "wanb_r"] },
+		{ ".name": "fdef", "use_route": ["wan_r"], "last_resort": "default" },
+		{ ".name": "fblack", "use_route": ["wanb_r"], "last_resort": "blackhole" }
+	],
+	"rule": [
+		{ ".name": "to_default", "rule_id": "1", "proto": "udp", "dest_port": "5004", "use_strategy": "default", "local": "1", "family": ["ipv4"] }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+m.update_iface_to_table();
+m.set_iface_hotplug_state('wan', 'offline');
+m.set_iface_hotplug_state('wanb', 'offline');
+m.nft_file('create', 'dynamic');
+m.set_general_nftables();
+m.rebuild_iface_nftfile();
+m.set_strategies_nftables();
+m.nft_file('install', 'dynamic');
+m.nft_file('create', 'rules');
+m.set_user_rules();
+m.nft_file('install', 'rules');
+let lines = split(global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft') +
+	global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/11-mwan4-rules.nft'), '\n');
+
+let chain = name => {
+	let out = [], inside = false;
+	for (let l in lines) {
+		if (l == '\tchain ' + name + ' {') inside = true;
+		else if (inside && l == '\t}') break;
+		else if (inside) push(out, l);
+	}
+	return out;
+};
+let show = (title, rows) => print(title + ':\n' + join('\n', rows) + '\n');
+
+for (let name in ['failover', 'fdef', 'fblack'])
+	show('strategy ' + name, map(chain('mwan4_strategy_' + name + '_ipv4'), l => replace(replace(l, /counter name [a-z0-9_]+ /, ''), /^\t\t/, '')));
+show('rule to default', uniq(filter(lines, l => index(l, 'comment "to_default"') >= 0)));
+show('conntrack saves of mwan4_output', filter(chain('mwan4_output'), l => index(l, 'ct mark set') >= 0));
+show('lasting default marks save themselves', filter(lines, l => index(l, 'comment "default"') >= 0 && index(l, 'iifname "eth0"') >= 0));
+print('copies meta mark into ct mark: ' + (index(join('\n', lines), 'ct mark set meta mark') >= 0) + '\n');
+-- End --
+
+-- Expect stdout --
+strategy failover:
+oifname "eth0" meta mark & 0x3f00 == 0 meta mark set 0x3f00 comment "out wan eth0"
+oifname "eth1" meta mark & 0x3f00 == 0 meta mark set 0x3f00 comment "out wanb eth1"
+meta mark & 0x3f00 == 0 meta mark set 0x3e00 comment "unreachable"
+strategy fdef:
+oifname "eth0" meta mark & 0x3f00 == 0 meta mark set 0x3f00 comment "out wan eth0"
+meta mark & 0x3f00 == 0 meta mark set 0x3f00 comment "default"
+strategy fblack:
+oifname "eth1" meta mark & 0x3f00 == 0 meta mark set 0x3f00 comment "out wanb eth1"
+meta mark & 0x3f00 == 0 meta mark set 0x3d00 comment "blackhole"
+rule to default:
+		meta l4proto udp udp dport { 5004 } meta mark & 0x3f00 == 0 counter name mwan4_counter_rule_to_default_ipv4 meta mark set 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00 comment "to_default"
+conntrack saves of mwan4_output:
+		meta mark & 0x3f00 == 0 ip daddr @mwan4_custom_ipv4 meta mark set meta mark & 0xffffc0ff | 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00
+		meta mark & 0x3f00 == 0 ip daddr @mwan4_connected_ipv4 meta mark set meta mark & 0xffffc0ff | 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00
+		meta mark & 0x3f00 == 0 ip daddr @mwan4_dynamic_ipv4 meta mark set meta mark & 0xffffc0ff | 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00
+		meta mark & 0x3f00 == 0 ip6 daddr @mwan4_custom_ipv6 meta mark set meta mark & 0xffffc0ff | 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00
+		meta mark & 0x3f00 == 0 ip6 daddr @mwan4_connected_ipv6 meta mark set meta mark & 0xffffc0ff | 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00
+		meta mark & 0x3f00 == 0 ip6 daddr @mwan4_dynamic_ipv6 meta mark set meta mark & 0xffffc0ff | 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00
+		meta mark & 0x3f00 == 0 ct mark set ct mark & 0xffffc0ff
+		meta mark & 0x3f00 == 0x100 ct mark set ct mark & 0xffffc0ff | 0x100
+		meta mark & 0x3f00 == 0x200 ct mark set ct mark & 0xffffc0ff | 0x200
+lasting default marks save themselves:
+		iifname "eth0" ip saddr @mwan4_custom_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_custom_default meta mark set 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00 comment "default"
+		iifname "eth0" ip saddr @mwan4_connected_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_connected_default meta mark set 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00 comment "default"
+		iifname "eth0" ip saddr @mwan4_dynamic_ipv4 meta mark & 0x3f00 == 0 counter name mwan4_counter_iface_wan_ipv4_dynamic_default meta mark set 0x3f00 ct mark set ct mark & 0xffffc0ff | 0x3f00 comment "default"
+copies meta mark into ct mark: false
+-- End --

@@ -50,6 +50,10 @@ Domain rules need `dnsmasq-full` (nftset support, `SUGGESTS` in the package). Wi
 
 An `interface` with `option type 'tunnel'` or `option default_route '1'` gets `default dev <device>` in its mwan4 table (per `family`), and its health checks are sent through the device with its own mark. This works for tunnels without a netifd default route (for example WireGuard with `defaultroute '0'`). A strategy that only contains such an interface with `last_resort 'unreachable'` fails closed: an IPv4-only tunnel has no IPv6 route, so IPv6 traffic is unreachable instead of leaking.
 
+### Fallback marks and conntrack
+
+While every route of a strategy is offline its chain falls back per packet: `oifname` rules send traffic whose main-table route already leaves through one of the offline links to the main table (`default` mark, so health probes and handshakes can still use that link; they never move traffic to another interface), and everything else gets the `last_resort` mark (`unreachable`, `blackhole` or `default`). These marks are not saved in the conntrack mark. Only WAN marks are saved by the shared tail of `mwan4_prerouting`/`mwan4_output`; the lasting `default` marks (destination or source in the `connected`/`custom`/`dynamic` sets, a rule with `use_strategy 'default'`, `'unreachable'` or `'blackhole'`) save themselves where they are assigned. A flow that keeps itself alive during an outage (WireGuard keepalives, DNS retries) is therefore evaluated again on its next packet and leaves through the recovered WAN instead of staying on the dead link. Flows already pinned by an earlier release stay pinned until they expire or are flushed (`conntrack -D --mark 0x3f00/0x3f00`).
+
 ### Connection counting
 
 Every rule counts the connections it routes, and the active connections can be attributed to rule, WAN and strategy.

@@ -1859,12 +1859,20 @@ function set_general_rules() {
 
 // ── nftables Base ────────────────────────────────────────────────────
 
+// Constant same-register op: only the mwan4 WAN bits change, every other owner's conntrack bits stay.
+function ct_mark_save(mark) {
+	return sprintf('ct mark set ct mark & %s | %s', mwan4.mmx_mask_inv, mark);
+}
+
+// Set matches are deterministic per destination, so the default mark they assign is recorded in conntrack;
+// the post-rule check only overrides the packet.
 function _nft_set_check_rules(family, zero_check) { // ucode-lsp disable
 	let flag = (family == 'ipv4') ? NFT_IPV4 : NFT_IPV6;
 	let mark_expr = zero_check
 		? sprintf('meta mark & %s == 0', mwan4.mmx_mask)
 		: sprintf('meta mark & %s != %s', mwan4.mmx_mask, mwan4.mmx_default);
 	let mark_set = sprintf('meta mark set meta mark & %s | %s', mwan4.mmx_mask_inv, mwan4.mmx_default);
+	if (zero_check) mark_set += ' ' + ct_mark_save(mwan4.mmx_default);
 
 	let rules = [];
 	for (let settype in ['custom', 'connected', 'dynamic'])
@@ -1873,6 +1881,10 @@ function _nft_set_check_rules(family, zero_check) { // ucode-lsp disable
 	return rules;
 }
 
+// Only WAN marks are saved here. The default/unreachable/blackhole marks a strategy falls back to while its
+// routes are offline are per-packet decisions: conntrack would restore them for as long as the flow lives, so
+// flows that keep themselves alive (tunnel keepalives, DNS retries) would stay on the dead link after recovery.
+// Marks that are a lasting decision save themselves where they are assigned (set checks, interface-in, rules).
 function _nft_conntrack_save_rules() {
 	let marks = [], seen = {}, ordinal = 0;
 	uci_foreach('interface', function(section) {
@@ -1884,17 +1896,10 @@ function _nft_conntrack_save_rules() {
 			push(marks, mark);
 		}
 	});
-	for (let mark in [ mwan4.mmx_default, mwan4.mmx_blackhole, mwan4.mmx_unreachable ]) {
-		if (!seen[mark]) {
-			seen[mark] = true;
-			push(marks, mark);
-		}
-	}
 
 	let rules = [ sprintf('\t\tmeta mark & %s == 0 ct mark set ct mark & %s', mwan4.mmx_mask, mwan4.mmx_mask_inv) ];
 	for (let mark in marks)
-		push(rules, sprintf('\t\tmeta mark & %s == %s ct mark set ct mark & %s | %s',
-			mwan4.mmx_mask, mark, mwan4.mmx_mask_inv, mark));
+		push(rules, sprintf('\t\tmeta mark & %s == %s %s', mwan4.mmx_mask, mark, ct_mark_save(mark)));
 	return rules;
 }
 
@@ -2178,8 +2183,9 @@ function rebuild_iface_nftfile() {
 			push(chain_lines, '', sprintf('\tchain %s {', chain_name));
 			for (let settype in ['custom', 'connected', 'dynamic']) {
 				let counter = nft_add_counter(counter_defs, counter_seen, 'iface', iface, family, settype, 'default');
-				push(chain_lines, sprintf('\t\tiifname "%s" %s saddr @%s_%s_%s meta mark & %s == 0 %s meta mark set %s comment "default"',
-					device, nftflag, NFT_PREFIX, settype, family, mwan4.mmx_mask, nft_counter_use(counter), mwan4.mmx_default));
+				push(chain_lines, sprintf('\t\tiifname "%s" %s saddr @%s_%s_%s meta mark & %s == 0 %s meta mark set %s %s comment "default"',
+					device, nftflag, NFT_PREFIX, settype, family, mwan4.mmx_mask, nft_counter_use(counter), mwan4.mmx_default,
+					ct_mark_save(mwan4.mmx_default)));
 			}
 			let counter = nft_add_counter(counter_defs, counter_seen, 'iface', iface, family);
 			push(chain_lines, sprintf('\t\tiifname "%s" meta mark & %s == 0 %s meta mark set %s comment "%s"',
@@ -2425,11 +2431,8 @@ function rule_domain_set(rule, family) {
 }
 
 function rule_mark_action(use_strategy, family) {
-	switch (use_strategy) {
-		case 'default':     return { action: sprintf('meta mark set %s', mwan4.mmx_default) };
-		case 'unreachable': return { action: sprintf('meta mark set %s', mwan4.mmx_unreachable) };
-		case 'blackhole':   return { action: sprintf('meta mark set %s', mwan4.mmx_blackhole) };
-	}
+	let marks = { default: mwan4.mmx_default, unreachable: mwan4.mmx_unreachable, blackhole: mwan4.mmx_blackhole };
+	if (marks[use_strategy]) return { action: sprintf('meta mark set %s %s', marks[use_strategy], ct_mark_save(marks[use_strategy])) };
 	return { action: sprintf('jump %s_strategy_%s_%s', NFT_PREFIX, use_strategy, family), jump: true };
 }
 
