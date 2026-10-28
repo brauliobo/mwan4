@@ -9,6 +9,7 @@ import package_ctl from 'packages';
 import dnsmasq from 'dnsmasq';
 import connections from 'connections';
 import stability from 'stability';
+import flush from 'flush';
 
 // Forward declarations — defined later but referenced by the export block.
 // ucode does not hoist function declarations.
@@ -4071,20 +4072,23 @@ function track_clean(iface) {
 
 // ── Conntrack ────────────────────────────────────────────────────────
 
+// A recovered WAN keeps its flows; one that stays offline loses them after the grace period.
 function flush_conntrack(iface, action) {
 	if (!validate_section_name(iface)) return;
-	let flush_list = uci_get_list(iface, 'flush_conntrack');
-	for (let trigger in flush_list) {
-		if (trigger == action) {
-			let mark = get_iface_mark(iface);
-			if (mark) {
-				run(sprintf('conntrack -D --mark %s/%s 2>/dev/null', mark, mwan4.mmx_mask));
-				LOG('info', sprintf("conntrack flushed for '%s' (mark %s/%s) on '%s'",
-					iface, mark, mwan4.mmx_mask, action));
-			}
-			break;
-		}
+	let offline = get_iface_hotplug_state(iface) != 'online';
+	if (!offline) flush.cancel(iface);
+
+	let mark = get_iface_mark(iface);
+	if (!mark || index(uci_get_list(iface, 'flush_conntrack'), action) < 0) return;
+
+	let grace = stability_opts(iface).flush_grace;
+	if (grace == 0) {
+		flush.flush_all(mark, mwan4.mmx_mask);
+	} else {
+		flush.flush_dead(mark, mwan4.mmx_mask);
+		if (offline) flush.schedule_remaining(iface, mark, mwan4.mmx_mask, grace, time());
 	}
+	LOG('info', sprintf("conntrack flushed for '%s' (mark %s/%s) on '%s'", iface, mark, mwan4.mmx_mask, action));
 }
 
 function interface_shutdown(iface) {

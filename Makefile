@@ -91,6 +91,8 @@ define Package/mwan4/install
 		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/stability.uc \
 		$(1)/lib/mwan4/
+	$(INSTALL_DATA) ./files/lib/mwan4/flush.uc \
+		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/pbr_import.uc \
 		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/cli.uc \

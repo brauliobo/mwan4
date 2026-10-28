@@ -1,0 +1,75 @@
+Testing the conntrack flush: dead-looking flows go at once, the remaining flows of an offline WAN after flush_grace in a detached single-flight job that a recovery cancels, and flush_grace 0 keeps the legacy full flush.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"], "flush_conntrack": ["connected", "disconnected"] },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"], "flush_conntrack": ["disconnected"], "flush_grace": "0" },
+		{ ".name": "wanc", "enabled": "1", "id": "3", "table_id": "3", "mark": "0x300", "family": ["ipv4"] }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+m.set_scriptname('test');
+m.init();
+
+let now = 1000000;
+global.time = () => now;
+let calls = [];
+global.system = cmd => { if (index(cmd, 'logger') != 0) push(calls, cmd); return 0; };
+
+function trigger(title, iface, action, state) {
+	calls = [];
+	m.set_iface_hotplug_state(iface, state);
+	m.flush_conntrack(iface, action);
+	print('-- ' + title + ' (' + length(calls) + ' commands)\n' + join('\n', calls) + '\n');
+}
+let deadline = iface => global.mocklib.read_captured('/var/run/mwan4/flush/' + iface + '.deadline');
+
+trigger('wan disconnected', 'wan', 'disconnected', 'offline');
+print('deadline file: ' + trim(deadline('wan')) + '\n');
+
+now += 4;
+trigger('second flap supersedes: same job, later deadline', 'wan', 'disconnected', 'offline');
+print('deadline file: ' + trim(deadline('wan')) + '\n');
+
+now += 3;
+trigger('wan recovered, trigger connected', 'wan', 'connected', 'online');
+print('deadline cancelled: ' + (deadline('wan') == null) + '\n');
+
+trigger('wan disconnected, action not configured', 'wan', 'ifdown', 'offline');
+print('deadline file: ' + (deadline('wan') == null) + '\n');
+
+trigger('wanb flush_grace 0: legacy full flush', 'wanb', 'disconnected', 'offline');
+trigger('wanc without flush_conntrack', 'wanc', 'disconnected', 'offline');
+-- End --
+
+-- Expect stdout --
+-- wan disconnected (4 commands)
+conntrack -D --mark 0x100/0x3f00 -u UNSET 2>/dev/null
+conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_SENT 2>/dev/null
+conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_RECV 2>/dev/null
+(flock -n 9 || exit 0; while [ -f /var/run/mwan4/flush/wan.deadline ]; do d=$(cat /var/run/mwan4/flush/wan.deadline); n=$(date +%s); [ $n -ge $d ] || { sleep $((d - n)); continue; }; rm -f /var/run/mwan4/flush/wan.deadline; [ "$(cat /var/run/mwan4/iface_state/wan 2>/dev/null)" = online ] || conntrack -D --mark 0x100/0x3f00 2>/dev/null; done) 9>/var/run/mwan4/flush/wan.lock </dev/null >/dev/null 2>&1 1000>&- &
+deadline file: 1000010
+-- second flap supersedes: same job, later deadline (4 commands)
+conntrack -D --mark 0x100/0x3f00 -u UNSET 2>/dev/null
+conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_SENT 2>/dev/null
+conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_RECV 2>/dev/null
+(flock -n 9 || exit 0; while [ -f /var/run/mwan4/flush/wan.deadline ]; do d=$(cat /var/run/mwan4/flush/wan.deadline); n=$(date +%s); [ $n -ge $d ] || { sleep $((d - n)); continue; }; rm -f /var/run/mwan4/flush/wan.deadline; [ "$(cat /var/run/mwan4/iface_state/wan 2>/dev/null)" = online ] || conntrack -D --mark 0x100/0x3f00 2>/dev/null; done) 9>/var/run/mwan4/flush/wan.lock </dev/null >/dev/null 2>&1 1000>&- &
+deadline file: 1000014
+-- wan recovered, trigger connected (3 commands)
+conntrack -D --mark 0x100/0x3f00 -u UNSET 2>/dev/null
+conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_SENT 2>/dev/null
+conntrack -D --mark 0x100/0x3f00 -p tcp --state SYN_RECV 2>/dev/null
+deadline cancelled: true
+-- wan disconnected, action not configured (0 commands)
+
+deadline file: true
+-- wanb flush_grace 0: legacy full flush (1 commands)
+conntrack -D --mark 0x200/0x3f00 2>/dev/null
+-- wanc without flush_conntrack (0 commands)
+
+-- End --
