@@ -1,0 +1,47 @@
+Testing the health a restarted tracker resumes from: an online link stays online with its score, an offline or recovering one stays offline, anything stale or unknown falls back to initial_state; plus the tracker list the init script reads.
+
+-- Testcase --
+import continuity from 'continuity';
+
+// up=5 down=5: scores above 5 are online, at most 10
+function decide(title, previous) {
+	let r = continuity.carry_over(previous, 5, 5);
+	print(sprintf('%-28s -> %s\n', title, r ? r.status + ' score ' + r.score : 'initial_state'));
+}
+
+decide('online, score 9', { status: 'online', score: 9, age: 3 });
+decide('online, no score file', { status: 'online', score: null, age: 3 });
+decide('online, score out of range', { status: 'online', score: 99, age: 3 });
+decide('online, never probed', { status: 'online', score: null, age: null });
+decide('disconnecting at 7', { status: 'disconnecting', score: 7, age: 3 });
+decide('offline', { status: 'offline', score: 0, age: 3 });
+decide('connecting at 3', { status: 'connecting', score: 3, age: 3 });
+decide('connecting, score too high', { status: 'connecting', score: 8, age: 3 });
+decide('disabled by an ifdown', { status: 'disabled', score: 0, age: 3 });
+decide('no previous run', { status: '', score: null, age: null });
+decide('older than the limit', { status: 'online', score: 9, age: continuity.CARRY_MAX_AGE + 1 });
+decide('exactly at the limit', { status: 'online', score: 9, age: continuity.CARRY_MAX_AGE });
+print(sprintf('%-28s -> %s\n', 'nothing at all', continuity.carry_over(null, 5, 5) ? 'carried' : 'initial_state'));
+
+print(continuity.render_trackers([{ iface: 'wan', family: 'ipv4', sig: 'aa' }, { iface: 'wan', family: 'ipv6', sig: 'aa' }]));
+print('empty list: [' + continuity.render_trackers([]) + ']\n');
+-- End --
+
+-- Expect stdout --
+online, score 9              -> online score 9
+online, no score file        -> online score 10
+online, score out of range   -> online score 10
+online, never probed         -> online score 10
+disconnecting at 7           -> online score 7
+offline                      -> offline score 0
+connecting at 3              -> offline score 3
+connecting, score too high   -> offline score 4
+disabled by an ifdown        -> initial_state
+no previous run              -> initial_state
+older than the limit         -> initial_state
+exactly at the limit         -> online score 9
+nothing at all               -> initial_state
+wan ipv4 aa
+wan ipv6 aa
+empty list: []
+-- End --

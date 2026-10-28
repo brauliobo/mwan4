@@ -6,6 +6,7 @@
 import { popen, readfile, writefile, stat, mkdir } from 'fs';
 import m from 'mwan4';
 import stability from 'stability';
+import continuity from 'continuity';
 
 let uloop = require('uloop');
 
@@ -30,6 +31,8 @@ function getpid() {
 
 m.set_scriptname('mwan4track');
 
+// ARGV[2] is the signature of the interface configuration: it only differs so procd restarts the tracker when
+// the configuration changed, and keeps it running otherwise.
 let INTERFACE = ARGV[0];
 let FAMILY = ARGV[1] || 'ipv4';
 if (!m.validate_section_name(INTERFACE) || !m.validate_family(FAMILY)) {
@@ -50,6 +53,7 @@ let ifup_event = false; // ucode-lsp disable
 let PING = '';
 
 let score, host_up_count, lost, turn;
+let carried = null; // verdict of the previous run to resume from instead of initial_state
 let sleep_time; // ucode-lsp disable
 
 // ── Config (loaded in main) ──────────────────────────────────────────
@@ -302,7 +306,29 @@ function validate_track_method(method) {
 
 // ── First Connect ───────────────────────────────────────────────────
 
+// The verdict files the previous tracker of this interface left, if any.
+function previous_run() {
+	let read = name => rtrim(readfile(status_dir + '/' + name) || '', '\n');
+	let time_seen = read('TIME');
+	return {
+		status: read('STATUS'),
+		score:  length(read('SCORE')) ? int(read('SCORE')) : null,
+		age:    length(time_seen) ? m.get_uptime() - int(time_seen) : null,
+	};
+}
+
+// Picks up where the previous tracker left off: no hotplug event, the strategies already reflect the verdict.
+function resume(from) {
+	STATUS = from.status;
+	score = from.score;
+	ws('STATUS', STATUS);
+	if (STATUS == 'online') quality.degraded = stability.quality_read(INTERFACE);
+	m.LOG('notice', 'Interface', INTERFACE, '(' + DEVICE + ') resumes as', STATUS, 'with score', '' + score);
+}
+
 function firstconnect() {
+	let resumed = carried;
+	carried = null;
 	let true_iface = m.get_true_iface(INTERFACE, FAMILY);
 	let st = m.ubus_call('network.interface.' + true_iface, 'status');
 	DEVICE = st?.l3_device || st?.device || '';
@@ -312,7 +338,9 @@ function firstconnect() {
 		return;
 	}
 
-	if (STATUS != 'online')
+	if (resumed)
+		STATUS = resumed.status;
+	else if (STATUS != 'online')
 		STATUS = m.uci_get(INTERFACE, 'initial_state') || 'online';
 
 	if (!st?.up || !DEVICE) {
@@ -325,7 +353,9 @@ function firstconnect() {
 		INTERFACE, true_iface, DEVICE, STATUS, SRC_IP));
 
 	started();
-	if (STATUS == 'offline')
+	if (resumed)
+		resume(resumed);
+	else if (STATUS == 'offline')
 		disconnected(true);
 	else
 		connected(true);
@@ -511,6 +541,8 @@ function clean_up() {
 
 m.init();
 
+let previous = previous_run();
+
 // Set up status directory
 mkdir(status_dir);
 writefile(status_dir + '/PID', '' + getpid() + '\n');
@@ -567,6 +599,7 @@ score = down + up;
 host_up_count = 0;
 lost = 0;
 turn = 0;
+carried = continuity.carry_over(previous, up, down);
 
 // Initialize uloop
 uloop.init();
