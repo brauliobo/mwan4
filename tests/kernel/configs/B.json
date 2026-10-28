@@ -1,0 +1,25 @@
+{
+ "globals": [
+  {".name": "globals", "mmx_mask": "0x3F00", "rule_mask": "0x00fc0000", "source_routing": "0"}
+ ],
+ "interface": [
+  {".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "track_ip": ["1.1.1.1"], "family": ["ipv4"], "reliability": "1", "initial_state": "offline"},
+  {".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "track_ip": ["8.8.8.8"], "family": ["ipv4"], "reliability": "1"}
+ ],
+ "route": [
+  {".name": "wan_m1", "interface": "wan", "metric": "1", "weight": "1"},
+  {".name": "wanb_m2", "interface": "wanb", "metric": "2", "weight": "1"},
+  {".name": "wanb_m1", "interface": "wanb", "metric": "1", "weight": "1"}
+ ],
+ "strategy": [
+  {".name": "failover", "use_route": ["wan_m1", "wanb_m2"]},
+  {".name": "wanb_only", "use_route": ["wanb_m1"]},
+  {".name": "old_strat", "use_route": ["wan_m1"]}
+ ],
+ "rule": [
+  {".name": "r_dom", "domain": ["example.com"], "use_strategy": "failover", "family": ["ipv4"]},
+  {".name": "r_old", "domain": ["old.example.org"], "use_strategy": "old_strat", "family": ["ipv4"]},
+  {".name": "r_src", "src_ip": ["10.9.0.0/25"], "use_strategy": "wanb_only", "family": ["ipv4"], "sticky": "1", "timeout": "600"},
+  {".name": "default_rule_v4", "dest_ip": "0.0.0.0/0", "use_strategy": "failover", "family": ["ipv4"]}
+ ]
+}

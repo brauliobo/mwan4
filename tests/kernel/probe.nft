@@ -1,0 +1,15 @@
+table inet probe {
+	counter total {
+	}
+	counter unmarked {
+	}
+	chain raw {
+		type filter hook prerouting priority raw; policy accept;
+		iifname "lan0" ip daddr 100.64.0.0/10 notrack
+	}
+	chain pre {
+		type filter hook prerouting priority mangle + 10; policy accept;
+		iifname "lan0" ip daddr 100.64.0.0/10 counter name total
+		iifname "lan0" ip daddr 100.64.0.0/10 meta mark & 0x3f00 == 0 counter name unmarked
+	}
+}

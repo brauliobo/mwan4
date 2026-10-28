@@ -274,5 +274,29 @@ else
 fi
 rm -f /tmp/init_script.$$.diff
 
+# ── Real kernel (nft, ip, namespaces) ───────────────────────────────
+
+printf "\n##\n## Checking the seamless reload against the real kernel\n##\n\n"
+name="kernel: reload, hotplug, stop/start"
+printf "%s %s " "$name" "${line:${#name}}"
+if [ "$have_ucode" = 1 ]; then
+	kernel_out=$(sh tests/kernel/run.sh 2>&1)
+	kernel_rc=$?
+	case "$kernel_out" in
+		skipped*) printf "SKIPPED (%s)\n" "${kernel_out#skipped: }" ;;
+		*)
+			n_tests=$((n_tests + 1))
+			if [ $kernel_rc = 0 ]; then
+				printf "OK\n"
+			else
+				printf "FAIL\n%s\n" "$kernel_out"
+				n_fails=$((n_fails + 1))
+			fi
+		;;
+	esac
+else
+	printf "SKIPPED (ucode not found)\n"
+fi
+
 printf "\nRan %d tests, %d okay, %d failures\n" $n_tests $((n_tests - n_fails)) $n_fails
 exit $n_fails
