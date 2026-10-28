@@ -2668,8 +2668,16 @@ function sync_dnsmasq(rule_data) {
 		dnsmasq.restart();
 }
 
+// Every fw4 reload reinstalls the mwan4 nft include and with it empties the domain sets dnsmasq filled, so every
+// reload needs a refill. It only makes sense while some WAN is online: with all of them down DNS is dead and the
+// `connected` reload of the recovering WAN refills the sets.
+function any_iface_online() {
+	return length(filter(uci_section_names('interface'), iface => get_iface_hotplug_state(iface) == 'online')) > 0;
+}
+
 // Domains of enabled rules, read straight from UCI (usable without building nft rules).
 prefetch_domains = function() {
+	if (!any_iface_online()) return;
 	let domains = [];
 	for (let s in ordered_rules())
 		if (rule_enabled(s)) push(domains, ...filter(map(as_list(s.domain), v => trim('' + v)), validate_hostname));

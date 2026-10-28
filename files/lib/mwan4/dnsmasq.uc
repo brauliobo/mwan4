@@ -9,6 +9,8 @@ import { readfile, writefile, unlink, popen } from 'fs';
 import { cursor } from 'uci';
 
 const CONF_NAME = 'mwan4.conf';
+const PREFETCH_LOCK = '/var/run/mwan4/prefetch.lock';
+const PREFETCH_SECONDS = 60;
 
 function shell_quote(s) {
 	return "'" + replace('' + s, "'", "'\\''") + "'";
@@ -77,10 +79,18 @@ function restart() {
 
 // Resolve every domain through the local dnsmasq in the background so the
 // nft sets are populated without waiting for the first client lookup.
+// The job is detached from the caller: fd 1000 is the procd_lock of the hotplug script and stays locked as long as
+// any descendant keeps it open, so a stalled lookup would block later hotplug events. flock keeps a single job
+// running and the deadline stops it from outliving a dead DNS.
+function prefetch_command(domains) {
+	return sprintf('(flock -n 9 || exit 0; end=$(($(date +%%s) + %d)); n=0; ' +
+		'until nslookup localhost 127.0.0.1 >/dev/null 2>&1 || [ $n -ge 20 ]; do n=$((n+1)); sleep 1; done; ' +
+		'for d in %s; do [ $(date +%%s) -lt $end ] || break; nslookup "$d" 127.0.0.1 >/dev/null 2>&1; done) ' +
+		'9>%s </dev/null >/dev/null 2>&1 1000>&- &', PREFETCH_SECONDS, join(' ', map(domains, d => shell_quote(d))), PREFETCH_LOCK);
+}
+
 function prefetch(domains) {
-	if (!length(domains)) return;
-	system(sprintf('(n=0; until nslookup localhost 127.0.0.1 >/dev/null 2>&1 || [ $n -ge 20 ]; do n=$((n+1)); sleep 1; done; ' +
-		'for d in %s; do nslookup "$d" 127.0.0.1 >/dev/null 2>&1; done) >/dev/null 2>&1 &', join(' ', map(domains, d => shell_quote(d)))));
+	if (length(domains)) system(prefetch_command(domains));
 }
 
 export default {
@@ -90,5 +100,6 @@ export default {
 	sync,
 	nftset_supported,
 	restart,
+	prefetch_command,
 	prefetch,
 };

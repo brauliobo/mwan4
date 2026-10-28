@@ -58,6 +58,8 @@ step('first sync', () => m.sync_dnsmasq(rules));
 print(global.mocklib.read_captured('/tmp/dnsmasq.main.d/mwan4.conf'));
 print('same file for custom conf-dir: ' + (global.mocklib.read_captured('/tmp/alt.d/mwan4.conf') == global.mocklib.read_captured('/tmp/dnsmasq.main.d/mwan4.conf')) + '\n');
 step('unchanged sync', () => m.sync_dnsmasq(rules));
+step('prefetch with every WAN offline', () => m.prefetch_domains());
+m.set_iface_hotplug_state('wan6', 'online');
 step('prefetch', () => m.prefetch_domains());
 step('no domain rules', () => m.sync_dnsmasq({ ipv4: [], ipv6: [] }));
 print('file removed: ' + !global.mocklib.has_captured('/tmp/dnsmasq.main.d/mwan4.conf') + '\n');
@@ -74,8 +76,9 @@ nftset=/cdn.example.net/4#inet#fw4#mwan4_dom_streaming_ipv4,6#inet#fw4#mwan4_dom
 nftset=/legacy.example.org/4#inet#fw4#mwan4_dom_v4only_ipv4
 same file for custom conf-dir: true
 --- unchanged sync (0 commands)
+--- prefetch with every WAN offline (0 commands)
 --- prefetch (1 commands)
-(n=0; until nslookup localhost 127.0.0.1 >/dev/null 2>&1 || [ $n -ge 20 ]; do n=$((n+1)); sleep 1; done; for d in 'example.com' 'cdn.example.net' 'legacy.example.org'; do nslookup "$d" 127.0.0.1 >/dev/null 2>&1; done) >/dev/null 2>&1 &
+(flock -n 9 || exit 0; end=$(($(date +%s) + 60)); n=0; until nslookup localhost 127.0.0.1 >/dev/null 2>&1 || [ $n -ge 20 ]; do n=$((n+1)); sleep 1; done; for d in 'example.com' 'cdn.example.net' 'legacy.example.org'; do [ $(date +%s) -lt $end ] || break; nslookup "$d" 127.0.0.1 >/dev/null 2>&1; done) 9>/var/run/mwan4/prefetch.lock </dev/null >/dev/null 2>&1 1000>&- &
 --- no domain rules (1 commands)
 /etc/init.d/dnsmasq running && /etc/init.d/dnsmasq restart >/dev/null 2>&1
 file removed: true

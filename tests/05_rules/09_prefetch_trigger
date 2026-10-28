@@ -1,0 +1,55 @@
+Testing that the domain prefetch is detached from the hotplug lock and only runs after a successful fw4 reload while a WAN is online.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "wan_only", "use_route": ["wan_r"] }
+	],
+	"rule": [
+		{ ".name": "streaming", "domain": ["example.com"], "use_strategy": "wan_only" }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+import dnsmasq from 'dnsmasq';
+m.set_scriptname('test');
+m.init();
+
+let calls = [], rc = 0;
+global.system = (cmd) => { push(calls, cmd); return rc; };
+
+function reload(title) {
+	calls = [];
+	m.fw4_reload();
+	print(title + ': ' + join(' | ', map(calls, c => split(c, ' ')[0])) + '\n');
+}
+
+let cmd = dnsmasq.prefetch_command(['example.com']);
+print('closes the hotplug lock fd: ' + (index(cmd, ' 1000>&- &') > 0) + '\n');
+print('single flight on its own lock: ' + (index(cmd, 'flock -n 9 || exit 0') > 0 && index(cmd, '9>/var/run/mwan4/prefetch.lock') > 0) + '\n');
+print('bounded by a deadline: ' + (index(cmd, '[ $(date +%s) -lt $end ] || break') > 0) + '\n');
+
+reload('all WANs offline');
+m.set_iface_hotplug_state('wan', 'online');
+reload('WAN online');
+rc = 1;
+reload('failed reload');
+-- End --
+
+-- Expect stdout --
+closes the hotplug lock fd: true
+single flight on its own lock: true
+bounded by a deadline: true
+all WANs offline: fw4
+WAN online: fw4 | (flock
+failed reload: fw4 | logger
+-- End --
