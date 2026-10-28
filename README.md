@@ -18,6 +18,34 @@ The diagnostic only reports state. It does not change configuration, start servi
 
 OpenWrt package for the nftables-based `mwan4` service.
 
+## Reload, restart and upgrades
+
+A configuration change (`uci commit mwan4`, LuCI save and apply, rpc, `/etc/init.d/mwan4 reload`) is applied to the running service without a teardown, and so is `/etc/init.d/mwan4 restart` of a running service. Only `stop` followed by `start` tears everything down.
+
+**What a reload does**
+
+- The nftables ruleset is rebuilt and loaded as one `nft -f` transaction against the live `inet fw4` table: the mwan4 chains are flushed and refilled in the same transaction, so a packet is evaluated against either the old or the new ruleset and never against an empty or missing chain. Sets are declared again without their elements, so dnsmasq-learned domain sets (`mwan4_dom_*`), the `dynamic` set, sticky maps and all counters keep their contents. The `connected` and `custom` sets are refreshed in the same transaction. Obsolete chains, counters, domain sets and sticky maps are deleted at the end of it; a sticky map whose timeout changed is recreated. fw4 is not reloaded.
+- The transaction is validated with `nft -c` before anything changes. If the kernel refuses it (for instance another table still jumps to a removed strategy chain) the reload is abandoned with an error in the system log and the previous ruleset, ip rules, routes and trackers stay as they were.
+- The persisted include (`/usr/share/nftables.d/ruleset-post/10-mwan4.nft`, `11-mwan4-rules.nft`) is updated too, so a later fw4 reload or a reboot reproduces the same state.
+- ip rules and routing tables are reconciled: missing rules are added before the new ruleset goes live, rules that are no longer wanted are deleted after it, a changed rule is added before the old one is retired, and the routing table of an interface that is gone or no longer up is flushed. Rules of other owners and conntrack are never touched.
+- A tracker is restarted only when its interface was added or its configuration changed (the interface options, its derived id, table and mark, the stability options it inherits, the quality limits of the strategies that use it, or `mmx_mask`). The init script passes a signature of that configuration to the tracker, so procd restarts exactly those trackers; trackers of removed interfaces stop. The route monitors keep running. Hold, quality and history state, the iface state and `/var/run/mwan4` as a whole are preserved; the state of removed interfaces is dropped.
+- The dnsmasq conf is rewritten (and dnsmasq restarted) only when its content changed, and only the domains of new sets, or of sets that gained a domain, are looked up again. MPTCP endpoints are only reapplied when the MPTCP configuration changed.
+- Interface hotplug events (`connected`, `disconnected`, `ifup`, `ifdown`, `released`, `quality`) use the same atomic transaction instead of an fw4 reload, so they no longer empty the domain sets either.
+
+**Health of a restarted tracker.** A tracker that is restarted because its configuration changed resumes from the verdict files of its predecessor instead of applying `initial_state`: a link that was online stays online with its score (only failing probes take it down), one that was offline or still recovering stays offline, and no hotplug event is fired for it. `initial_state` only applies when there is no usable previous verdict: cold start after boot, an interface that was just added, a verdict older than 15 minutes, or an interface that was down (`ifdown`). The same rule covers a tracker respawned by procd.
+
+**stop and start.** `stop` is the full teardown (routes, ip rules, nft include, fw4 reload, state directories). It parks the tracker verdicts and the hold and quality state in `/var/run/mwan4.state` (tmpfs, together with the link history as before); a `start` within 15 minutes puts them back for the interfaces that still exist, are enabled and are up, and the trackers resume from them as above. After a reboot the state is gone and the cold start applies `initial_state` as always.
+
+**Upgrading the package.** The package install does not restart mwan4: the old code keeps running until it is told to reload. Run
+
+```sh
+/etc/init.d/mwan4 reload
+```
+
+to activate the new code without a routing gap. The first reload after an upgrade from a release without this behaviour restarts every tracker once (their command line changes) and carries their health over.
+
+**What stays outside the transaction.** The transaction is atomic for the mwan4 objects; it does not touch what fw4 generates, and the ip rules, routes and trackers are applied around it in the order above rather than in a single step. Routes inside a table that stay valid are not removed, and `mmx_mask` changes only reach the route monitors on their next restart.
+
 ## Unstable WAN handling
 
 A flaky WAN used to flap between online and offline every few seconds, each flap reloading the firewall and flushing every flow on that WAN, and a recovered preferred WAN pulled traffic back at once. These options keep such a link from disturbing the others. All of them live in `config globals` as defaults and can be overridden in an `interface` section with the same name; legacy behaviour is `flap_damping '0'`, `recovery_hold '0'` and `flush_grace '0'`.
@@ -91,7 +119,7 @@ DSL that drops three times in ten minutes is held out for five minutes of stable
 }
 ```
 
-`flaps.total` and `availability` come from the transition log, `/var/run/mwan4/history/<iface>` (one `epoch state reason` line per event, the last 200 kept, replaced atomically; it survives `mwan4 reload`/`restart` but not a reboot). States are `online` (`start`, `recovered`), `offline` (`probe`, `ifdown`), `held` (`flapping`, `recovering`), `released`, `degraded` (strategy names) and `restored`; availability counts `held` as up. `ubus call mwan4 link_history '{"interface":"wan","since":1793180000,"limit":50}'` (all arguments optional, `limit` at most 200) returns the events oldest first:
+`flaps.total` and `availability` come from the transition log, `/var/run/mwan4/history/<iface>` (one `epoch state reason` line per event, the last 200 kept, replaced atomically; it survives `mwan4 reload`, `restart` and `stop`/`start` but not a reboot). States are `online` (`start`, `recovered`), `offline` (`probe`, `ifdown`), `held` (`flapping`, `recovering`), `released`, `degraded` (strategy names) and `restored`; availability counts `held` as up. `ubus call mwan4 link_history '{"interface":"wan","since":1793180000,"limit":50}'` (all arguments optional, `limit` at most 200) returns the events oldest first:
 
 ```json
 { "ok": true, "interfaces": { "wan": {
@@ -130,7 +158,7 @@ Upgrade note: router-originated traffic used to traverse every rule. It now only
 
 ### Domain rules and dnsmasq
 
-mwan4 writes one file, `mwan4.conf`, into the conf-dir of every dnsmasq instance (`option confdir` of `config dnsmasq`, default `/tmp/dnsmasq.<instance>.d`) with `nftset=/dom1/dom2/4#inet#fw4#<set4>,6#inet#fw4#<set6>` lines. Domains shared by several rules are merged onto one line (dnsmasq only honours the first `nftset` line of a domain). dnsmasq is restarted only when the file changed; without domain rules the file is removed. Every fw4 reload (service start, reload, interface hotplug) empties the domain sets, so after each successful one mwan4 resolves every domain through `127.0.0.1` so the sets fill without waiting for clients. The job is skipped while no WAN is online (DNS is dead; the `connected` reload of the recovering WAN refills the sets), runs detached with the hotplug lock fd closed (a stalled lookup cannot delay later hotplug events), is single-flight (`flock` on `/var/run/mwan4/prefetch.lock`) and stops starting lookups after 60 seconds.
+mwan4 writes one file, `mwan4.conf`, into the conf-dir of every dnsmasq instance (`option confdir` of `config dnsmasq`, default `/tmp/dnsmasq.<instance>.d`) with `nftset=/dom1/dom2/4#inet#fw4#<set4>,6#inet#fw4#<set6>` lines. Domains shared by several rules are merged onto one line (dnsmasq only honours the first `nftset` line of a domain). dnsmasq is restarted only when the file changed; without domain rules the file is removed. A fw4 reload (service start, firewall restart) empties the domain sets, so after each successful one mwan4 resolves every domain through `127.0.0.1` so the sets fill without waiting for clients. A reload of mwan4 and interface hotplug events do not reload fw4 and keep the sets; only the domains of new sets, or of sets that gained a domain, are looked up. The job is skipped while no WAN is online (DNS is dead; the `connected` event of the recovering WAN does not refill the sets, a lookup by a client does), runs detached with the hotplug lock fd closed (a stalled lookup cannot delay later hotplug events), is single-flight (`flock` on `/var/run/mwan4/prefetch.lock`) and stops starting lookups after 60 seconds.
 
 Domain rules need `dnsmasq-full` (nftset support, `SUGGESTS` in the package). Without it mwan4 never writes the file (dnsmasq would refuse to start), `ubus call mwan4 capabilities` reports `domains.dnsmasq_nftset: false`, and `validate` warns with `dnsmasqNftsetMissing`.
 
