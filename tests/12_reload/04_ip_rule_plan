@@ -1,0 +1,87 @@
+Testing ip rule reconciliation: rules are parsed into the shape the planner expects, only missing rules are added, only owned obsolete ones are deleted, and a changed rule is added before the old one is retired.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] }
+	]
+}
+-- End --
+
+-- File fs/popen~ip_-4_rule_list.txt --
+0:	from all lookup local
+1001:	from all iif eth9 lookup 1
+2001:	from all fwmark 0x100/0x3f00 lookup 1
+3001:	from all fwmark 0x100/0x3f00 unreachable
+2002:	from all fwmark 0x200/0x3f00 lookup 2
+32766:	from all lookup main
+32767:	from all lookup default
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+import reconcile from 'reconcile';
+
+for (let line in [
+	'1001:\tfrom all iif eth9 lookup 1',
+	'2061:\tfrom all fwmark 0x3d00/0x3f00 blackhole',
+	'2001:\tfrom all fwmark 0x100 lookup 1 proto static',
+	'3001:\tfrom all fwmark 0x100/0x3f00 unreachable',
+	'0:\tfrom all lookup local',
+	'100:\tfrom 10.0.0.0/8 lookup 5',
+]) {
+	let r = reconcile.parse_rule(line);
+	print(sprintf('%-52s -> %s\n', line, r ? reconcile.rule_key(r) : 'ignored'));
+}
+
+let owned = { '1001': true, '2001': true, '3001': true };
+let wanted = [
+	{ pref: 1001, iif: 'eth0', action: 'lookup 1' },
+	{ pref: 2001, fwmark: { value: 0x100, mask: 0x3f00 }, action: 'lookup 1' },
+	{ pref: 3001, fwmark: { value: 0x100, mask: 0x3f00 }, action: 'unreachable' },
+];
+let plan = reconcile.plan_rules(map([
+	'1001:\tfrom all iif eth9 lookup 1',
+	'2001:\tfrom all fwmark 0x100/0x3f00 lookup 1',
+	'2002:\tfrom all fwmark 0x200/0x3f00 lookup 2',
+	'32766:\tfrom all lookup main',
+], x => x), wanted, owned);
+print('add: ' + join(' ; ', map(plan.add, reconcile.rule_key)) + '\n');
+print('del: ' + join(' ; ', map(plan.del, reconcile.rule_key)) + '\n');
+
+plan = reconcile.plan_rules(['1001:\tfrom all iif eth0 lookup 1'], wanted, owned);
+print('already there: add ' + length(plan.add) + ', del ' + length(plan.del) + '\n');
+
+// Through the module: the interface moved from eth9 to eth0
+m.set_scriptname('test');
+m.init();
+let cmds = [];
+global.system = cmd => { if (index(cmd, 'logger') != 0) push(cmds, cmd); return 0; };
+
+m.create_iface_rules('wan', 'eth0');
+print(join('\n', cmds) + '\n');
+
+cmds = [];
+print('-- ifdown\n');
+m.delete_iface_rules('wan');
+print(join('\n', cmds) + '\n');
+-- End --
+
+-- Expect stdout --
+1001:	from all iif eth9 lookup 1                     -> 1001|eth9||lookup 1
+2061:	from all fwmark 0x3d00/0x3f00 blackhole        -> 2061||3d00/3f00|blackhole
+2001:	from all fwmark 0x100 lookup 1 proto static    -> 2001||100/ffffffff|lookup 1
+3001:	from all fwmark 0x100/0x3f00 unreachable       -> 3001||100/3f00|unreachable
+0:	from all lookup local                             -> 0|||lookup local
+100:	from 10.0.0.0/8 lookup 5                        -> ignored
+add: 1001|eth0||lookup 1 ; 3001||100/3f00|unreachable
+del: 1001|eth9||lookup 1
+already there: add 2, del 0
+ip -4 rule add pref 1001 iif 'eth0' lookup 1 >/dev/null 2>&1
+ip -4 rule del pref 1001 iif 'eth9' lookup 1 >/dev/null 2>&1
+-- ifdown
+ip -4 rule del pref 1001 iif 'eth9' lookup 1 >/dev/null 2>&1
+ip -4 rule del pref 2001 fwmark 0x100/0x3f00 lookup 1 >/dev/null 2>&1
+ip -4 rule del pref 3001 fwmark 0x100/0x3f00 unreachable >/dev/null 2>&1
+-- End --

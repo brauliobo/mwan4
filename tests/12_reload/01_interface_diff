@@ -1,0 +1,81 @@
+Testing which interfaces a reload leaves alone: signatures ignore key order and unrelated sections, classification separates new, changed, unchanged and removed interfaces and adopts a service started by an older release.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"], "track_ip": ["1.1.1.1"] },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"], "track_ip": ["8.8.8.8"] }
+	],
+	"route": [
+		{ ".name": "wan_m1", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wanb_m1", "interface": "wanb", "metric": "1", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "wan_only", "use_route": ["wan_m1"] },
+		{ ".name": "wanb_only", "use_route": ["wanb_m1"], "max_loss": "20" }
+	],
+	"rule": [{ ".name": "web", "dest_port": "443", "proto": "tcp", "use_strategy": "wan_only" }]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+import continuity from 'continuity';
+
+let digest = continuity.digest;
+print('digest ignores key order: ' + (digest({ a: 1, b: ['x', { c: 2, d: 3 }] }) == digest({ b: ['x', { d: 3, c: 2 }], a: 1 })) + '\n');
+print('digest sees a value: ' + (digest({ a: 1 }) != digest({ a: 2 })) + '\n');
+print('digest is 64 bit hex: ' + !!match(digest({ a: 1 }), /^[0-9a-f]{16}$/) + '\n');
+
+function show(title, r) {
+	print(title + ': ' + join(' ', map(['added', 'changed', 'unchanged', 'removed'], k => k + '=' + join(',', r[k]))) + '\n');
+}
+show('first apply', continuity.classify({}, [], { a: 's1', b: 's1' }));
+show('mixed', continuity.classify({ a: 's1', b: 's1', c: 's1' }, ['a', 'b', 'c'], { a: 's1', b: 's2', d: 's1' }));
+show('service of an older release', continuity.classify({}, ['a', 'b'], { a: 's1', b: 's1' }));
+
+m.set_scriptname('test');
+m.init();
+let previous = m.interface_signatures();
+print('signed interfaces: ' + join(',', sort(keys(previous))) + '\n');
+
+// Edits the configuration the way a commit does and says which interfaces kept their signature.
+function edit(title, change) {
+	let c = require('uci').cursor();
+	c.load('mwan4');
+	let config = c.get_all('mwan4');
+	change(config);
+	global.mocklib.uci_store.mwan4 = config;
+	m.reload();
+
+	let now = m.interface_signatures();
+	print(title + ': ' + join(' ', map(sort(keys(previous)), n => n + ' same=' + (now[n] == previous[n]))) + '\n');
+	previous = now;
+}
+
+edit('track_ip of wanb', config => { config.wanb.track_ip = ['9.9.9.9']; });
+edit('rule edit', config => { config.web.dest_port = '80'; });
+edit('quality limit of a strategy using wanb', config => { config.wanb_only.max_loss = '5'; });
+edit('stability default in globals', config => { config.globals.flap_threshold = '4'; });
+edit('route weight', config => { config.wan_m1.weight = '3'; });
+edit('removed interface', config => { delete config.wanb; });
+print('left: ' + join(',', sort(keys(previous))) + '\n');
+-- End --
+
+-- Expect stdout --
+digest ignores key order: true
+digest sees a value: true
+digest is 64 bit hex: true
+first apply: added=a,b changed= unchanged= removed=
+mixed: added=d changed=b unchanged=a removed=c
+service of an older release: added= changed=a,b unchanged= removed=
+signed interfaces: wan,wanb
+track_ip of wanb: wan same=true wanb same=false
+rule edit: wan same=true wanb same=true
+quality limit of a strategy using wanb: wan same=true wanb same=false
+stability default in globals: wan same=false wanb same=false
+route weight: wan same=true wanb same=true
+removed interface: wan same=true wanb same=false
+left: wan
+-- End --

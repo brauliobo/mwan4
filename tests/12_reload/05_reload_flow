@@ -1,0 +1,209 @@
+Testing a reload of a running service: the nft transaction is validated first, rules and routes are added before it goes live and retired after it, interfaces whose configuration did not change keep their trackers, and neither fw4 nor conntrack is touched.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00", "rule_mask": "0x00fc0000" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"], "track_ip": ["1.1.1.1"] },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"], "track_ip": ["8.8.8.8"] },
+		{ ".name": "wanc", "enabled": "1", "id": "3", "table_id": "3", "mark": "0x300", "family": ["ipv4"] },
+		{ ".name": "wan4", "enabled": "1", "id": "4", "table_id": "4", "mark": "0x400", "family": ["ipv4"] }
+	],
+	"route": [
+		{ ".name": "wan_m1", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wanb_m2", "interface": "wanb", "metric": "2", "weight": "1" }
+	],
+	"strategy": [{ ".name": "failover", "use_route": ["wan_m1", "wanb_m2"] }],
+	"rule": [
+		{ ".name": "media", "domain": ["media.example.com"], "use_strategy": "failover", "family": ["ipv4"] },
+		{ ".name": "old", "domain": ["old.example.org"], "use_strategy": "failover", "family": ["ipv4"] }
+	]
+}
+-- End --
+
+-- File ubus/network.interface.wanb~status.json --
+{ "up": true, "l3_device": "eth1", "device": "eth1", "ipv4-address": [{ "address": "10.1.0.2", "mask": 24 }] }
+-- End --
+
+-- File uci/dhcp.json --
+{ "dnsmasq": [{ ".name": "main" }] }
+-- End --
+
+-- File fs/popen~dnsmasq_--version_2_dev_null.txt --
+Compile time options: IPv6 GNU-getopt DBus no-UBus i18n IDN2 DHCP DHCPv6 no-Lua TFTP conntrack ipset nftset auth DNSSEC loop-detect inotify dumpfile
+-- End --
+
+-- File ubus/network.interface.wan4~status.json --
+{ "up": false, "l3_device": "eth4", "device": "eth4" }
+-- End --
+
+-- File ubus/network.interface.wanc~status.json --
+{ "up": true, "l3_device": "eth2", "device": "eth2", "ipv4-address": [{ "address": "10.2.0.2", "mask": 24 }] }
+-- End --
+
+-- File fs/popen~ip_-4_rule_list.txt --
+0:	from all lookup local
+1001:	from all iif eth0 lookup 1
+1002:	from all iif eth1 lookup 2
+1004:	from all iif eth4 lookup 4
+2001:	from all fwmark 0x100/0x3f00 lookup 1
+2002:	from all fwmark 0x200/0x3f00 lookup 2
+2004:	from all fwmark 0x400/0x3f00 lookup 4
+2061:	from all fwmark 0x3d00/0x3f00 blackhole
+2062:	from all fwmark 0x3e00/0x3f00 unreachable
+3001:	from all fwmark 0x100/0x3f00 unreachable
+3002:	from all fwmark 0x200/0x3f00 unreachable
+3004:	from all fwmark 0x400/0x3f00 unreachable
+32766:	from all lookup main
+32767:	from all lookup default
+-- End --
+
+-- File fs/popen~ip_-6_rule_list.txt --
+0:	from all lookup local
+2061:	from all fwmark 0x3d00/0x3f00 blackhole
+2062:	from all fwmark 0x3e00/0x3f00 unreachable
+32766:	from all lookup main
+-- End --
+
+-- File fs/popen~ip_-4_route_list_table_4_2_dev_null.txt --
+default via 10.4.0.1 dev eth4
+-- End --
+
+-- Testcase --
+let fs = require('fs');
+let ubus = require('ubus');
+
+// Interfaces named like wan_4 do not exist; answer that without the mock's missing fixture notice.
+let connect = ubus.connect;
+ubus.connect = () => {
+	let conn = connect();
+	let call = conn.call;
+	conn.call = (object, method, args) => match(object, /_[46]$/) ? null : call(object, method, args);
+	return conn;
+};
+
+let log = [], live_listing = '', transaction;
+let popen = fs.popen;
+fs.popen = (cmd, mode) => {
+	push(log, cmd);
+	if (index(cmd, 'nft -t list table') == 0)
+		return { read: () => live_listing, close: () => 0 };
+	if (index(cmd, 'nft -f ') == 0)
+		transaction = global.mocklib.read_captured(split(cmd, ' ')[2]);
+	return popen(cmd, mode);
+};
+global.system = cmd => { if (index(cmd, 'logger') != 0) push(log, cmd); return 0; };
+
+import m from 'mwan4';
+import reconcile from 'reconcile';
+
+// What the previous setup left behind: states, applied record, live nft objects, installed tracker list.
+function previous_apply() {
+	m.update_iface_to_table();
+	for (let iface in ['wan', 'wanb', 'wanc', 'wan4'])
+		m.set_iface_hotplug_state(iface, 'online');
+	let rules = m.collect_user_rules();
+	m.generate_nft(rules, true);
+	m.sync_dnsmasq(rules);
+	m.record_applied(rules);
+	m.persist_policy_ownership();
+
+	let live = reconcile.declarations(m.nft_file('lines'));
+	live_listing = join('\n', map(['chain', 'set', 'map', 'counter'], kind => join('\n', map(keys(live[kind]), name => '\t' + kind + ' ' + name + ' {'))));
+}
+
+m.set_scriptname('test');
+m.init();
+previous_apply();
+print('trackers before:\n' + global.mocklib.read_captured('/var/run/mwan4/trackers'));
+
+// The configuration changes: wanb tracks another target, rule "old" is replaced by "fresh", wan4 is removed
+function edit(change) {
+	let c = require('uci').cursor();
+	c.load('mwan4');
+	let config = c.get_all('mwan4');
+	change(config);
+	global.mocklib.uci_store.mwan4 = config;
+}
+edit(config => {
+	config.wanb.track_ip = ['9.9.9.9'];
+	delete config.wan4;
+	delete config.old;
+	config.fresh = { '.name': 'fresh', '.type': 'rule', '.index': 99, domain: ['fresh.example.net'], use_strategy: 'failover', family: ['ipv4'] };
+});
+
+m.reload();
+m.init(null, true);
+log = [];
+print('reload ok: ' + m.reload_running() + '\n');
+
+let interesting = filter(log, c => match(c, /^(ip -[46] (rule (add|del)|route flush)|nft (-c )?-f|fw4|conntrack|\/etc\/init\.d|ucode|\(flock)/));
+print(join('\n', map(interesting, c => replace(c, /for d in .*; do/, 'for d in ...; do'))) + '\n');
+print('prefetch only the new domain: ' + (length(filter(log, c => index(c, "'fresh.example.net'") >= 0 && index(c, 'media.example.com') < 0)) == 1) + '\n');
+
+let verbs = filter(split(transaction, '\n'), l => match(l, /^(flush|delete) /));
+print('-- transaction\n' + join('\n', verbs) + '\n');
+print('-- trackers after\n' + global.mocklib.read_captured('/var/run/mwan4/trackers'));
+print('persisted rules file has the new domain set: ' + (index(global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/11-mwan4-rules.nft'), 'mwan4_dom_fresh_ipv4') >= 0) + '\n');
+print('policy ownership kept: ' + trim(global.mocklib.read_captured('/var/run/mwan4/mwan4.rule_prefs')) + '\n');
+print('wanc state: ' + m.get_iface_hotplug_state('wanc') + '\n');
+print('-- dnsmasq\n' + global.mocklib.read_captured('/tmp/dnsmasq.main.d/mwan4.conf'));
+-- End --
+
+-- Expect stdout --
+trackers before:
+wan ipv4 5bf87bc223e7a373
+wanb ipv4 5a0696ec5ea6d735
+reload ok: true
+nft -c -f /var/run/mwan4.nft.txn 2>&1
+nft -c -f /var/run/mwan4.nft.combined 2>&1
+ip -4 rule add pref 1003 iif 'eth2' lookup 3 >/dev/null 2>&1
+ip -4 rule add pref 2003 fwmark 0x300/0x3f00 lookup 3 >/dev/null 2>&1
+ip -4 rule add pref 3003 fwmark 0x300/0x3f00 unreachable >/dev/null 2>&1
+nft -c -f /var/run/mwan4.nft.txn 2>&1
+nft -f /var/run/mwan4.nft.txn 2>&1
+ip -4 rule del pref 1004 iif 'eth4' lookup 4 >/dev/null 2>&1
+ip -4 rule del pref 2004 fwmark 0x400/0x3f00 lookup 4 >/dev/null 2>&1
+ip -4 rule del pref 3004 fwmark 0x400/0x3f00 unreachable >/dev/null 2>&1
+ip -4 route flush table 4 >/dev/null 2>&1
+/etc/init.d/dnsmasq running && /etc/init.d/dnsmasq restart >/dev/null 2>&1
+(flock -n 9 || exit 0; end=$(($(date +%s) + 60)); n=0; until nslookup localhost 127.0.0.1 >/dev/null 2>&1 || [ $n -ge 20 ]; do n=$((n+1)); sleep 1; done; for d in ...; done) 9>/var/run/mwan4/prefetch.lock </dev/null >/dev/null 2>&1 1000>&- &
+prefetch only the new domain: true
+-- transaction
+flush chain inet fw4 mwan4_ifaces_in
+flush chain inet fw4 mwan4_rules_ipv4
+flush chain inet fw4 mwan4_rules_ipv6
+flush chain inet fw4 mwan4_rules_out_ipv4
+flush chain inet fw4 mwan4_rules_out_ipv6
+flush chain inet fw4 mwan4_rules
+flush chain inet fw4 mwan4_rules_out
+flush chain inet fw4 mwan4_prerouting
+flush chain inet fw4 mwan4_output
+flush chain inet fw4 mwan4_iface_in_wan_ipv4
+flush chain inet fw4 mwan4_iface_in_wanb_ipv4
+flush chain inet fw4 mwan4_iface_in_wanc_ipv4
+flush chain inet fw4 mwan4_iface_in_wan4_ipv4
+flush chain inet fw4 mwan4_strategy_failover_ipv4
+flush chain inet fw4 mwan4_strategy_failover_ipv6
+flush set inet fw4 mwan4_connected_ipv4
+flush set inet fw4 mwan4_custom_ipv4
+flush set inet fw4 mwan4_connected_ipv6
+flush set inet fw4 mwan4_custom_ipv6
+delete chain inet fw4 mwan4_iface_in_wan4_ipv4
+delete set inet fw4 mwan4_dom_old_ipv4
+delete counter inet fw4 mwan4_counter_iface_wan4_ipv4_custom_default
+delete counter inet fw4 mwan4_counter_iface_wan4_ipv4_connected_default
+delete counter inet fw4 mwan4_counter_iface_wan4_ipv4_dynamic_default
+delete counter inet fw4 mwan4_counter_iface_wan4_ipv4
+delete counter inet fw4 mwan4_counter_rule_old_ipv4
+delete counter inet fw4 mwan4_counter_conn_old_ipv4
+-- trackers after
+wan ipv4 5bf87bc223e7a373
+wanb ipv4 f3c07d7460b60b3d
+persisted rules file has the new domain set: true
+policy ownership kept: 1001 1002 1003 2001 2002 2003 2061 2062 3001 3002 3003
+wanc state: online
+-- dnsmasq
+nftset=/media.example.com/4#inet#fw4#mwan4_dom_media_ipv4
+nftset=/fresh.example.net/4#inet#fw4#mwan4_dom_fresh_ipv4
+-- End --

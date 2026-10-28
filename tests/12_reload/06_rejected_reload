@@ -1,0 +1,87 @@
+Testing the guard rail of a reload: when the nft transaction does not validate nothing live changes (no ip rule, no nft -f, no installed include, no new tracker list) and the failure is reported; the hotplug apply is rejected the same way.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00", "rule_mask": "0x00fc0000" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"], "track_ip": ["1.1.1.1"] },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"], "track_ip": ["8.8.8.8"] }
+	],
+	"route": [{ ".name": "wan_m1", "interface": "wan", "metric": "1", "weight": "1" }],
+	"strategy": [{ ".name": "failover", "use_route": ["wan_m1"] }]
+}
+-- End --
+
+-- File ubus/network.interface.wanb~status.json --
+{ "up": true, "l3_device": "eth1", "device": "eth1", "ipv4-address": [{ "address": "10.1.0.2", "mask": 24 }] }
+-- End --
+
+-- Testcase --
+let fs = require('fs');
+let ubus = require('ubus');
+let connect = ubus.connect;
+ubus.connect = () => {
+	let conn = connect();
+	let call = conn.call;
+	conn.call = (object, method, args) => match(object, /_[46]$/) ? null : call(object, method, args);
+	return conn;
+};
+
+let log = [], reject = false;
+let popen = fs.popen;
+fs.popen = (cmd, mode) => {
+	push(log, cmd);
+	if (reject && index(cmd, 'nft -c -f /var/run/mwan4.nft.txn') == 0)
+		return { read: () => 'Error: Could not process rule: Device or resource busy', close: () => 1 };
+	return popen(cmd, mode);
+};
+global.system = cmd => { if (index(cmd, 'logger') != 0) push(log, cmd); return 0; };
+
+import m from 'mwan4';
+
+m.set_scriptname('test');
+m.init();
+m.update_iface_to_table();
+for (let iface in ['wan', 'wanb'])
+	m.set_iface_hotplug_state(iface, 'online');
+let rules = m.collect_user_rules();
+m.generate_nft(rules, true);
+m.record_applied(rules);
+m.nft_file('install', 'all');
+let installed = global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft');
+let trackers = global.mocklib.read_captured('/var/run/mwan4/trackers');
+
+// A new interface and a new strategy are configured, but the kernel refuses the transaction.
+let c = require('uci').cursor();
+c.load('mwan4');
+let config = c.get_all('mwan4');
+config.wanb.track_ip = ['9.9.9.9'];
+config.failover.use_route = ['wan_m1', 'wanb_m1'];
+config.wanb_m1 = { '.name': 'wanb_m1', '.type': 'route', '.index': 99, interface: 'wanb', metric: '2', weight: '1' };
+global.mocklib.uci_store.mwan4 = config;
+m.reload();
+m.init(null, true);
+
+reject = true;
+log = [];
+print('reload ok: ' + m.reload_running() + '\n');
+print(join('\n', filter(log, c => match(c, /^(ip -[46] (rule (add|del)|route (add|replace|del|flush))|nft -f|fw4|conntrack)/))) + '[no live command]\n');
+print('include untouched: ' + (global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft') == installed) + '\n');
+print('tracker list untouched: ' + (global.mocklib.read_captured('/var/run/mwan4/trackers') == trackers) + '\n');
+print('temporary transaction removed: ' + !global.mocklib.has_captured('/var/run/mwan4.nft.txn') + '\n');
+
+log = [];
+m.generate_nft(m.collect_user_rules(), true);
+print('hotplug apply: ' + (m.apply_nft() != null) + '\n');
+print('hotplug sent nothing live: ' + (length(filter(log, c => index(c, 'nft -f') == 0)) == 0) + '\n');
+-- End --
+
+-- Expect stdout --
+reload ok: false
+[no live command]
+include untouched: true
+tracker list untouched: true
+temporary transaction removed: true
+hotplug apply: false
+hotplug sent nothing live: true
+-- End --

@@ -63,11 +63,11 @@ function signal_trackers(signame) {
 	}
 }
 
-// Strategies read the hold and quality state files, so changing them only needs a rebuild.
+// Strategies read the hold and quality state files: the ruleset is regenerated and swapped in atomically, without
+// an fw4 reload that would empty the domain sets.
 function apply_strategies() {
-	m.rebuild_dynamic();
-	m.nft_file('install', 'dynamic');
-	m.fw4_reload();
+	m.generate_nft(m.collect_user_rules(), true);
+	m.apply_nft();
 }
 
 switch (ACTION) {

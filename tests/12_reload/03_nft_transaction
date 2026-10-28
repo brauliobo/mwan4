@@ -1,0 +1,82 @@
+Testing the nft transaction of a reload: one batch that flushes the live mwan4 chains, re-declares everything (idempotent adds that keep set elements and counters), refreshes only sets that carry elements, recreates a map whose definition changed and deletes obsolete objects last.
+
+-- Testcase --
+import reconcile from 'reconcile';
+
+let desired = [
+	'table inet fw4 {',
+	'\tset mwan4_connected_ipv4 {', '\t\ttype ipv4_addr', '\t\tflags interval', '\t\tauto-merge', '\t\telements = {', '\t\t\t10.0.0.0/8', '\t\t}', '\t}',
+	'\tset mwan4_dom_new_ipv4 {', '\t\ttype ipv4_addr', '\t\tflags interval', '\t\tauto-merge', '\t}',
+	'\tset mwan4_dom_kept_ipv4 {', '\t\ttype ipv4_addr', '\t\tflags interval', '\t\tauto-merge', '\t}',
+	'\tset userset {', '\t\ttype ipv4_addr', '\t}',
+	'\tmap mwan4_rule_ipv4_sticky {', '\t\ttypeof ip saddr : meta mark', '\t\tflags timeout', '\t\ttimeout 300s', '\t}',
+	'\tmap mwan4_rule_ipv4_same {', '\t\ttypeof ip saddr : meta mark', '\t\tflags timeout', '\t\ttimeout 600s', '\t}',
+	'\tcounter mwan4_counter_rule_a_ipv4 {', '\t}',
+	'\tchain mwan4_rules_ipv4 {', '\t\tip daddr @mwan4_dom_new_ipv4 jump mwan4_strategy_a_ipv4', '\t}',
+	'\tchain mwan4_strategy_a_ipv4 {', '\t\tmeta mark set 0x100', '\t}',
+	'\tchain mwan4_prerouting {', '\t\ttype filter hook prerouting priority mangle; policy accept;', '\t\tjump mwan4_rules_ipv4', '\t}',
+	'}',
+];
+
+let listing = join('\n', [
+	'table inet fw4 {',
+	'\tcounter mwan4_counter_rule_a_ipv4 {', '\t\tpackets 5 bytes 300', '\t}',
+	'\tcounter mwan4_counter_rule_gone_ipv4 {', '\t}',
+	'\tcounter othertool_counter {', '\t}',
+	'\tset mwan4_connected_ipv4 {', '\t\ttype ipv4_addr', '\t}',
+	'\tset mwan4_dom_kept_ipv4 {', '\t\ttype ipv4_addr', '\t}',
+	'\tset mwan4_dom_gone_ipv4 {', '\t\ttype ipv4_addr', '\t}',
+	'\tset userset {', '\t\ttype ipv4_addr', '\t}',
+	'\tset mwan4_custom_ipv4 {', '\t\ttype ipv4_addr', '\t}',
+	'\tmap mwan4_rule_ipv4_sticky {', '\t}',
+	'\tmap mwan4_rule_ipv4_same {', '\t}',
+	'\tmap mwan4_rule_ipv4_gone {', '\t}',
+	'\tchain input {', '\t}',
+	'\tchain mwan4_rules_ipv4 {', '\t}',
+	'\tchain mwan4_strategy_gone_ipv4 {', '\t}',
+	'\tchain mwan4_prerouting {', '\t}',
+	'}',
+]);
+
+let live = reconcile.live_objects(listing);
+print('live: ' + join(' ', map(['chain', 'set', 'map', 'counter'], k => k + '=' + join(',', sort(keys(live[k]))))) + '\n');
+
+let known_maps = { mwan4_rule_ipv4_sticky: 'typeof ip saddr : meta mark flags timeout timeout 600s', mwan4_rule_ipv4_same: 'typeof ip saddr : meta mark flags timeout timeout 600s' };
+let txn = reconcile.transaction(desired, live, known_maps, 'fw4');
+
+// Everything that is not part of the declarations.
+let verbs = filter(split(txn.text, '\n'), l => match(l, /^(flush|delete) /));
+print(join('\n', verbs) + '\n');
+print('declarations kept verbatim: ' + (index(txn.text, join('\n', desired)) >= 0) + '\n');
+print('flushes come before and deletes after the declarations: ' +
+	(index(txn.text, 'flush chain') < index(txn.text, 'table inet fw4 {') && rindex(txn.text, 'delete chain') > rindex(txn.text, '\n}\n')) + '\n');
+print('sets to fill: ' + join(',', txn.created) + '\n');
+print('maps recorded: ' + join(' | ', map(sort(keys(txn.maps)), k => k + '=' + txn.maps[k])) + '\n');
+
+// Nothing live at all (first apply, or fw4 table gone): nothing to flush or delete
+let first = reconcile.transaction(desired, reconcile.live_objects(''), {}, 'fw4');
+print('first apply: ' + length(filter(split(first.text, '\n'), l => match(l, /^(flush|delete) /))) + ' flush/delete lines, ' + length(first.created) + ' new sets\n');
+
+// A map unknown to the previous apply (older release) is left alone
+let adopted = reconcile.transaction(desired, live, null, 'fw4');
+print('adopted, sticky map recreated: ' + (index(adopted.text, 'delete map inet fw4 mwan4_rule_ipv4_sticky') >= 0) + '\n');
+-- End --
+
+-- Expect stdout --
+live: chain=mwan4_prerouting,mwan4_rules_ipv4,mwan4_strategy_gone_ipv4 set=mwan4_connected_ipv4,mwan4_custom_ipv4,mwan4_dom_gone_ipv4,mwan4_dom_kept_ipv4 map=mwan4_rule_ipv4_gone,mwan4_rule_ipv4_same,mwan4_rule_ipv4_sticky counter=mwan4_counter_rule_a_ipv4,mwan4_counter_rule_gone_ipv4
+flush chain inet fw4 mwan4_rules_ipv4
+flush chain inet fw4 mwan4_strategy_gone_ipv4
+flush chain inet fw4 mwan4_prerouting
+flush set inet fw4 mwan4_connected_ipv4
+delete map inet fw4 mwan4_rule_ipv4_sticky
+delete chain inet fw4 mwan4_strategy_gone_ipv4
+delete set inet fw4 mwan4_dom_gone_ipv4
+delete map inet fw4 mwan4_rule_ipv4_gone
+delete counter inet fw4 mwan4_counter_rule_gone_ipv4
+declarations kept verbatim: true
+flushes come before and deletes after the declarations: true
+sets to fill: mwan4_dom_new_ipv4,userset
+maps recorded: mwan4_rule_ipv4_same=typeof ip saddr : meta mark flags timeout timeout 600s | mwan4_rule_ipv4_sticky=typeof ip saddr : meta mark flags timeout timeout 300s
+first apply: 0 flush/delete lines, 4 new sets
+adopted, sticky map recreated: false
+-- End --

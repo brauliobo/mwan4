@@ -231,6 +231,15 @@ global.mocklib = {
 	/* Check if a path exists in the captured map */
 	has_captured: (path) => exists(_captured, path),
 
+	/* Names directly below a directory of captured files, or null when there are none */
+	list_captured: (dir) => {
+		let names = {};
+		for (let path in keys(_captured))
+			if (index(path, dir + '/') == 0)
+				names[split(substr(path, length(dir) + 1), '/')[0]] = true;
+		return length(names) ? sort(keys(names)) : null;
+	},
+
 	/* Remove a path from the captured map */
 	delete_captured: (path) => { delete _captured[path]; },
 };

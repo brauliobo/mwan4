@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mwan4
 PKG_VERSION:=0.1.1
-PKG_RELEASE:=28
+PKG_RELEASE:=29
 PKG_LICENSE:=AGPL-3.0-or-later
 PKG_MAINTAINER:=Stan Grishin <stangri@melmac.ca>
 
@@ -93,6 +93,10 @@ define Package/mwan4/install
 		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/flush.uc \
 		$(1)/lib/mwan4/
+	$(INSTALL_DATA) ./files/lib/mwan4/continuity.uc \
+		$(1)/lib/mwan4/
+	$(INSTALL_DATA) ./files/lib/mwan4/reconcile.uc \
+		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/pbr_import.uc \
 		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/cli.uc \
@@ -100,6 +104,8 @@ define Package/mwan4/install
 	$(INSTALL_DATA) ./files/lib/mwan4/hotplug_iface.uc \
 		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/init_setup.uc \
+		$(1)/lib/mwan4/
+	$(INSTALL_DATA) ./files/lib/mwan4/init_reload.uc \
 		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/init_teardown.uc \
 		$(1)/lib/mwan4/
@@ -137,6 +143,7 @@ define Package/mwan4/postinst
 if [ -z "$${IPKG_INSTROOT}" ]; then
 	echo -n "Installing rc.d symlink for mwan4... "
 	/etc/init.d/mwan4 enable && echo "OK" || echo "FAIL"
+	# mwan4 keeps running the old code: '/etc/init.d/mwan4 reload' activates the new code without a gap
 	/etc/init.d/rpcd restart >/dev/null 2>&1
 fi
 exit 0

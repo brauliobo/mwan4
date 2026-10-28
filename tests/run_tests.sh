@@ -14,7 +14,7 @@ if command -v ucode >/dev/null 2>&1; then
 	patch_dir="/tmp/mwan4_test_modules.$$"
 	mkdir -p "$patch_dir"
 
-	for module in mwan4 packages dnsmasq pbr_import connections stability flush continuity; do
+	for module in mwan4 packages dnsmasq pbr_import connections stability flush continuity reconcile; do
 		awk '
 			/^import \{ .* \} from .(fs|uci).;$/ {
 				mod = $0; sub(/.*from \x27/, "", mod); sub(/\x27;.*/, "", mod)
@@ -258,6 +258,21 @@ for shellscript in \
 		n_fails=$((n_fails + 1))
 	fi
 done
+
+# ── Init script behaviour ───────────────────────────────────────────
+
+printf "\n##\n## Checking init script behaviour\n##\n\n"
+name="etc/init.d/mwan4 start, reload, restart"
+n_tests=$((n_tests + 1))
+printf "%s %s " "$name" "${line:${#name}}"
+if sh tests/init_script.sh 2>&1 | diff -u tests/init_script.expected - > /tmp/init_script.$$.diff; then
+	printf "OK\n"
+else
+	printf "FAIL\n"
+	cat /tmp/init_script.$$.diff
+	n_fails=$((n_fails + 1))
+fi
+rm -f /tmp/init_script.$$.diff
 
 printf "\nRan %d tests, %d okay, %d failures\n" $n_tests $((n_tests - n_fails)) $n_fails
 exit $n_fails

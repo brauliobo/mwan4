@@ -107,6 +107,12 @@ return {
 		return mock;
 	},
 
+	lsdir: function(path) {
+		mocklib.trace_call("fs", "lsdir", { path });
+
+		return mocklib.list_captured(path);
+	},
+
 	unlink: function(path) {
 		mocklib.delete_captured(path);
 		mocklib.trace_call("fs", "unlink", { path });

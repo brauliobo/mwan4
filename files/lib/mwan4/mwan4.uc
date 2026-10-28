@@ -10,6 +10,8 @@ import dnsmasq from 'dnsmasq';
 import connections from 'connections';
 import stability from 'stability';
 import flush from 'flush';
+import continuity from 'continuity';
+import reconcile from 'reconcile';
 
 // Forward declarations — defined later but referenced by the export block.
 // ucode does not hoist function declarations.
@@ -430,6 +432,12 @@ let nft_file = (function() {
 		}
 		case 'show':
 			return readfile(NFT_FILES[target]) || '';
+		case 'lines': {
+			let all = [];
+			for (let name in keys(NFT_FILES))
+				push(all, ...(targets[name] ?? []));
+			return all;
+		}
 		}
 		return true;
 	};
@@ -1853,57 +1861,56 @@ function get_iface_hotplug_state(iface) {
 	return read_str(sprintf('%s/iface_state/%s', STATUS_DIR, iface)) || 'offline';
 }
 
-function init_iface_hotplug_states() {
+// What the tracker verdicts say about the interface, else its previous state, else initial_state and netifd.
+function initial_hotplug_state(s) {
+	let iface = s['.name'];
+	if (!uci_bool(s.enabled)) return 'offline';
+
+	let verdicts = map(get_families(iface), f => read_str(sprintf('%s/%s_%s/STATUS', TRACK_STATUS_DIR, iface, f)));
+	if (index(verdicts, 'online') >= 0) return 'online';
+	if (length(filter(verdicts, v => v == 'offline' || v == 'disabled' || v == 'disconnecting'))) return 'offline';
+
+	let current = read_str(sprintf('%s/iface_state/%s', STATUS_DIR, iface));
+	if (current == 'online' || current == 'offline') return current;
+	if ((s.initial_state || 'online') == 'offline') return 'offline';
+
+	let status = ubus_call(sprintf('network.interface.%s', get_true_iface(iface)), 'status');
+	let device = status?.l3_device || status?.device || '';
+	return (status?.up && validate_device_name(device)) ? 'online' : 'offline';
+}
+
+// All configured interfaces, or only the named ones.
+function init_iface_hotplug_states(only) {
 	uci_foreach('interface', function(s) {
 		let iface = s['.name'];
 		if (!validate_section_name(iface)) {
 			warn_invalid('section name', iface, 'hotplug state init');
 			return;
 		}
-
-		let state = 'offline';
-		if (uci_bool(s.enabled)) {
-			let tracked = false;
-			for (let family in get_families(iface)) {
-				let status_iface = sprintf('%s_%s', iface, family);
-				let status = read_str(sprintf('%s/%s/STATUS', TRACK_STATUS_DIR, status_iface));
-				if (status == 'online') {
-					state = 'online';
-					tracked = true;
-					break;
-				}
-				if (status == 'offline' || status == 'disabled' || status == 'disconnecting')
-					tracked = true;
-			}
-
-			if (!tracked) {
-				let current = read_str(sprintf('%s/iface_state/%s', STATUS_DIR, iface));
-				if (current == 'online' || current == 'offline') {
-					state = current;
-				} else if ((s.initial_state || 'online') != 'offline') {
-					let true_iface = get_true_iface(iface);
-					let status = ubus_call(sprintf('network.interface.%s', true_iface), 'status');
-					let device = status?.l3_device || status?.device || '';
-					if (status?.up && validate_device_name(device))
-						state = 'online';
-				}
-			}
-		}
-
-		set_iface_hotplug_state(iface, state);
+		if (only && index(only, iface) < 0) return;
+		set_iface_hotplug_state(iface, initial_hotplug_state(s));
 	});
 }
 
 // ── Initialization ───────────────────────────────────────────────────
 
-function init(name) {
+function persist_globals() {
+	writefile(STATUS_DIR + '/mwan4.mmx_mask', mwan4.mmx_mask);
+	LOG('debug', 'Using firewall mask', mwan4.mmx_mask);
+	writefile(STATUS_DIR + '/mwan4.iface_max', '' + mwan4.iface_max);
+	LOG('debug', 'Max interface count is', '' + mwan4.iface_max);
+}
+
+// Running instances keep the mask they started with; a reload reads it from the configuration again (`fresh`)
+// and records it once the new ruleset is live.
+function init(name, fresh) {
 	if (name) mwan4.scriptname = name;
 
 	ensure_dir(STATUS_DIR + '/iface_state');
 	ensure_dir(STATUS_NFT_LOG_DIR);
 	ensure_dir(TRACK_STATUS_DIR);
 
-	let saved_mask = read_str(STATUS_DIR + '/mwan4.mmx_mask');
+	let saved_mask = fresh ? null : read_str(STATUS_DIR + '/mwan4.mmx_mask');
 	if (saved_mask) {
 		mwan4.mmx_mask = saved_mask;
 		mwan4.iface_max = read_int(STATUS_DIR + '/mwan4.iface_max');
@@ -1912,12 +1919,8 @@ function init(name) {
 	_loaded = false;
 	_ensure_init();
 
-	if (!saved_mask) {
-		writefile(STATUS_DIR + '/mwan4.mmx_mask', mwan4.mmx_mask);
-		LOG('debug', 'Using firewall mask', mwan4.mmx_mask);
-		writefile(STATUS_DIR + '/mwan4.iface_max', '' + mwan4.iface_max);
-		LOG('debug', 'Max interface count is', '' + mwan4.iface_max);
-	}
+	if (!saved_mask && !fresh)
+		persist_globals();
 }
 
 // ── General IP Rules ─────────────────────────────────────────────────
@@ -2076,7 +2079,18 @@ function set_general_nftables() {
 
 // ── nftables Sets ────────────────────────────────────────────────────
 
-function set_custom_nftset() {
+// Staged sets only land in the generated rules file; otherwise they are also loaded into the live table right away.
+function add_set_rules(lines, tag, staged) {
+	if (!staged) {
+		let tmpfile = NFT_TEMP + '.' + tag;
+		writefile(tmpfile, join('\n', lines) + '\n');
+		nft_file('apply', tmpfile);
+		unlink(tmpfile);
+	}
+	nft_file('add', 'rules', ...lines);
+}
+
+function set_custom_nftset(staged) {
 	let lines = [
 		sprintf('table inet %s {', NFT_TABLE),
 		sprintf('\tset %s_custom_ipv4 {', NFT_PREFIX),
@@ -2124,14 +2138,10 @@ function set_custom_nftset() {
 	}
 
 	push(lines, '}');
-	let tmpfile = NFT_TEMP + '.custom_sets';
-	writefile(tmpfile, join('\n', lines) + '\n');
-	nft_file('apply', tmpfile);
-	unlink(tmpfile);
-	nft_file('add', 'rules', ...lines);
+	add_set_rules(lines, 'custom_sets', staged);
 }
 
-function set_connected_ipv4() {
+function set_connected_ipv4(staged) {
 	let cidr_list = [], host_list = [];
 
 	let all_lines = cmd_lines('ip -4 route');
@@ -2164,14 +2174,10 @@ function set_connected_ipv4() {
 	push(lines, '\t\t\t224.0.0.0/3');
 	push(lines, '\t\t}', '\t}', '}');
 
-	let tmpfile = NFT_TEMP + '.connected_v4';
-	writefile(tmpfile, join('\n', lines) + '\n');
-	nft_file('apply', tmpfile);
-	unlink(tmpfile);
-	nft_file('add', 'rules', ...lines);
+	add_set_rules(lines, 'connected_v4', staged);
 }
 
-function set_connected_ipv6() {
+function set_connected_ipv6(staged) {
 	if (mwan4.no_ipv6 != 0) return;
 
 	let lines = [
@@ -2194,14 +2200,10 @@ function set_connected_ipv6() {
 	if (!has) push(lines, '\t\t\t::1,');
 	push(lines, '\t\t}', '\t}', '}');
 
-	let tmpfile = NFT_TEMP + '.connected_v6';
-	writefile(tmpfile, join('\n', lines) + '\n');
-	nft_file('apply', tmpfile);
-	unlink(tmpfile);
-	nft_file('add', 'rules', ...lines);
+	add_set_rules(lines, 'connected_v6', staged);
 }
 
-function set_dynamic_nftset() {
+function set_dynamic_nftset(staged) {
 	let lines = [
 		sprintf('table inet %s {', NFT_TABLE),
 		sprintf('\tset %s_dynamic_ipv4 {', NFT_PREFIX),
@@ -2221,11 +2223,7 @@ function set_dynamic_nftset() {
 	}
 	push(lines, '}');
 
-	let tmpfile = NFT_TEMP + '.dynamic_init';
-	writefile(tmpfile, join('\n', lines) + '\n');
-	nft_file('apply', tmpfile);
-	unlink(tmpfile);
-	nft_file('add', 'rules', ...lines);
+	add_set_rules(lines, 'dynamic_init', staged);
 }
 
 // ── nftables Interfaces ──────────────────────────────────────────────
@@ -2855,28 +2853,66 @@ function delete_iface_route(iface) {
 
 // ── Interface IP Rules ───────────────────────────────────────────────
 
-function delete_iface_rules_family(iface, family) { // ucode-lsp disable
-	if (!validate_section_name(iface)) return;
-	family = normalize_family(family);
-	if (!family) return;
+function ip_family_cmd(family) {
+	return family == 'ipv4' ? 'ip -4' : 'ip -6';
+}
+
+function ip_families() {
+	return mwan4.no_ipv6 == 0 ? ['ipv4', 'ipv6'] : ['ipv4'];
+}
+
+function iface_prefs(iface) {
 	let id = get_iface_id(iface);
-	if (!id) return;
+	return id ? [id + 1000, id + 2000, id + 3000] : [];
+}
 
-	let ip_cmd;
-	if (family == 'ipv4')
-		ip_cmd = 'ip -4';
-	else if (family == 'ipv6' && mwan4.no_ipv6 == 0)
-		ip_cmd = 'ip -6';
-	else
-		return;
+function mark_match(mark) {
+	return { value: +mark, mask: +mwan4.mmx_mask };
+}
 
-	for (let line in cmd_lines(sprintf('%s rule list', ip_cmd))) {
-		let m = match(line, /^([0-9]+):/);
-		if (!m) continue;
-		let pref = int(m[1]);
-		if (pref > 1000 && pref < 4000 && (pref % 1000) == id)
-			run(sprintf('%s rule del pref %d', ip_cmd, pref));
-	}
+// The rules of an interface that is up: its own traffic, its marked traffic, and the marked traffic once it is down.
+function iface_rules(iface, device) {
+	let table_id = get_iface_table_id(iface);
+	let mark = get_iface_mark(iface);
+	let prefs = iface_prefs(iface);
+	if (!device || !length(prefs) || !table_id || !mark) return [];
+
+	return [
+		{ pref: prefs[0], iif: device, action: 'lookup ' + table_id },
+		{ pref: prefs[1], fwmark: mark_match(mark), action: 'lookup ' + table_id },
+		{ pref: prefs[2], fwmark: mark_match(mark), action: 'unreachable' },
+	];
+}
+
+function general_rules() {
+	return [
+		{ pref: mm_blackhole + 2000, fwmark: mark_match(mwan4.mmx_blackhole), action: 'blackhole' },
+		{ pref: mm_unreachable + 2000, fwmark: mark_match(mwan4.mmx_unreachable), action: 'unreachable' },
+	];
+}
+
+function rule_command(family, op, rule) {
+	let selector = [];
+	if (rule.iif) push(selector, 'iif', shell_quote(rule.iif));
+	if (rule.fwmark) push(selector, 'fwmark', sprintf('0x%x/0x%x', rule.fwmark.value, rule.fwmark.mask));
+	return sprintf('%s rule %s pref %d %s %s', ip_family_cmd(family), op, rule.pref, join(' ', selector), rule.action);
+}
+
+function existing_rules(family) {
+	return cmd_lines(ip_family_cmd(family) + ' rule list');
+}
+
+function set_of(values) {
+	let set = {};
+	for (let value in values) set[value] = true;
+	return set;
+}
+
+// Rules are added before they are needed and retired after they are not; no instant lacks a rule for a mark.
+function sync_iface_rules(iface, family, device) {
+	let plan = reconcile.plan_rules(existing_rules(family), iface_rules(iface, device), set_of(iface_prefs(iface)));
+	for (let rule in plan.add) run(rule_command(family, 'add', rule));
+	for (let rule in plan.del) run(rule_command(family, 'del', rule));
 }
 
 function create_iface_rules(iface, device) {
@@ -2885,33 +2921,17 @@ function create_iface_rules(iface, device) {
 		warn_invalid('device name', device, sprintf('interface %s rules', iface));
 		return;
 	}
-	foreach_family(iface, function(iface, family, device) {
-		let id = get_iface_id(iface);
-		let table_id = get_iface_table_id(iface);
-		let mark = get_iface_mark(iface);
-		if (!id || !table_id || !mark) return;
-
-		let ip_cmd;
-		if (family == 'ipv4')
-			ip_cmd = 'ip -4';
-		else if (family == 'ipv6' && mwan4.no_ipv6 == 0)
-			ip_cmd = 'ip -6';
-		else
-			return;
-
-		// Delete existing rules first
-		delete_iface_rules_family(iface, family);
-
-		run(sprintf('%s rule add pref %d iif %s lookup %d', ip_cmd, id + 1000, shell_quote(device), table_id));
-		run(sprintf('%s rule add pref %d fwmark %s/%s lookup %d', ip_cmd, id + 2000, mark, mwan4.mmx_mask, table_id));
-		run(sprintf('%s rule add pref %d fwmark %s/%s unreachable', ip_cmd, id + 3000, mark, mwan4.mmx_mask));
-	}, device);
+	foreach_family(iface, function(iface, family) {
+		if (family == 'ipv4' || mwan4.no_ipv6 == 0)
+			sync_iface_rules(iface, family, device);
+	});
 }
 
 function delete_iface_rules(iface) {
 	if (!validate_section_name(iface)) return;
 	foreach_family(iface, function(iface, family) {
-		delete_iface_rules_family(iface, family);
+		if (family == 'ipv4' || mwan4.no_ipv6 == 0)
+			sync_iface_rules(iface, family, null);
 	});
 }
 
@@ -4097,6 +4117,12 @@ function interface_shutdown(iface) {
 	track_clean(iface);
 }
 
+// The l3 device of an interface netifd reports up.
+function iface_l3_device(iface) {
+	let status = ubus_call(sprintf('network.interface.%s', get_true_iface(iface)), 'status');
+	return (status?.up && status?.l3_device) ? status.l3_device : null;
+}
+
 function ifup(iface, caller) {
 	if (!validate_section_name(iface)) {
 		warn_invalid('section name', iface, 'ifup');
@@ -4111,11 +4137,9 @@ function ifup(iface, caller) {
 		uci_ctx.load('mwan4');
 	}
 
-	let true_iface = get_true_iface(iface);
-	let iface_status = ubus_call(sprintf('network.interface.%s', true_iface), 'status');
-	if (!iface_status?.up || !iface_status?.l3_device) return;
+	let l3_device = iface_l3_device(iface);
+	if (!l3_device) return;
 
-	let l3_device = iface_status.l3_device;
 	if (!validate_device_name(l3_device)) {
 		warn_invalid('device name', l3_device, sprintf('interface %s ifup', iface));
 		return;
@@ -6231,6 +6255,222 @@ function advanced_control(args) {
 	return control_dispatch(args, ADVANCED_CONTROL_ACTIONS);
 }
 
+// ── Seamless Apply ───────────────────────────────────────────────────
+
+// Fills both generated nft files from the configuration; nothing reaches the kernel yet when `staged`.
+function generate_nft(rules, staged) {
+	rebuild_dynamic();
+	nft_file('create', 'rules');
+	set_dynamic_nftset(staged);
+	set_connected_ipv4(staged);
+	set_connected_ipv6(staged);
+	set_custom_nftset(staged);
+	set_user_rules(rules);
+}
+
+// The generated files as one nft transaction against the live table. Nothing is touched unless the
+// transaction and the files to persist both validate.
+function prepare_nft() {
+	let live = reconcile.live_objects(nft_output(sprintf('-t list table inet %s 2>/dev/null', NFT_TABLE)));
+	let plan = reconcile.transaction(nft_file('lines'), live, continuity.load_applied().maps, NFT_TABLE);
+	plan.path = NFT_TEMP + '.txn';
+	writefile(plan.path, plan.text);
+	if (nft_file('check', plan.path) && nft_file('install', 'all')) return plan;
+	unlink(plan.path);
+	return null;
+}
+
+// Swaps the live ruleset atomically; sets keep their elements, counters their values, no fw4 reload is needed.
+function commit_nft(plan) {
+	let ok = nft_file('apply', plan.path);
+	unlink(plan.path);
+	if (!ok) return false;
+
+	let applied = continuity.load_applied();
+	applied.maps = plan.maps;
+	continuity.save_applied(applied);
+	return true;
+}
+
+function apply_nft() {
+	let plan = prepare_nft();
+	return plan && commit_nft(plan) ? plan : null;
+}
+
+// Only domains of new sets, or sets that gained a domain, need a lookup to fill them.
+function fresh_domains(rules, previous, created) {
+	let domains = [];
+	for (let fam in ['ipv4', 'ipv6'])
+		for (let rd in filter(rules[fam], rd => rd.domain_set)) {
+			let known = previous?.[rd.domain_set] ?? (index(created, rd.domain_set) < 0 ? rd.domains : []);
+			if (length(filter(rd.domains, d => index(known, d) < 0))) push(domains, ...rd.domains);
+		}
+	return uniq(domains);
+}
+
+function prefetch_fresh(domains) {
+	if (any_iface_online()) dnsmasq.prefetch(domains);
+}
+
+// ── Seamless Interface State ─────────────────────────────────────────
+
+function iface_signature(s) {
+	let iface = s['.name'];
+	let options = {};
+	for (let key, value in s)
+		if (substr(key, 0, 1) != '.') options[key] = value;
+
+	return continuity.digest({
+		options, mask: mwan4.mmx_mask, stability: stability_opts(iface), limits: quality_limits(iface),
+		id: get_iface_id(iface), table: get_iface_table_id(iface), mark: get_iface_mark(iface),
+	});
+}
+
+// What a tracker is started from, per interface; a different signature restarts only that interface's trackers.
+function interface_signatures() {
+	let signatures = {};
+	uci_foreach('interface', function(s) {
+		if (validate_section_name(s['.name'])) signatures[s['.name']] = iface_signature(s);
+	});
+	return signatures;
+}
+
+function classify_interfaces() {
+	let previous = continuity.load_applied().sigs ?? {};
+	return continuity.classify(previous, continuity.known_interfaces(), interface_signatures());
+}
+
+function tracker_instances(signatures) {
+	let trackers = [];
+	uci_foreach('interface', function(s) {
+		let iface = s['.name'];
+		if (!validate_section_name(iface) || !uci_bool(s.enabled) || !length(uci_get_list(iface, 'track_ip'))) return;
+		for (let family in get_families(iface))
+			push(trackers, { iface, family, sig: signatures[iface] });
+	});
+	return trackers;
+}
+
+function domain_sets(rules) {
+	let sets = {};
+	for (let fam in ['ipv4', 'ipv6'])
+		for (let rd in filter(rules[fam], rd => rd.domain_set))
+			sets[rd.domain_set] = rd.domains;
+	return sets;
+}
+
+function mptcp_signature() {
+	return continuity.digest(get_mptcp_config());
+}
+
+// Records what is live so the next reload only touches what changed, and which trackers the init script runs.
+function record_applied(rules) {
+	let signatures = interface_signatures();
+	continuity.save_applied({
+		sigs:    signatures,
+		maps:    reconcile.map_signatures(nft_file('lines')),
+		domains: domain_sets(rules),
+		mptcp:   mptcp_signature(),
+	});
+	continuity.save_trackers(tracker_instances(signatures));
+}
+
+// Interfaces removed from the configuration take their state with them.
+function forget_interfaces(names) {
+	for (let iface in names) {
+		track_clean(iface);
+		for (let dir in ['iface_state', 'held', 'quality'])
+			unlink(sprintf('%s/%s/%s', STATUS_DIR, dir, iface));
+	}
+}
+
+function stash_state() {
+	continuity.stash(time());
+}
+
+// Takes the health a stop handed over back, for the interfaces that are configured and up again.
+function restore_state() {
+	continuity.restore(time(), iface => validate_section_name(iface) && uci_bool(uci_get(iface, 'enabled')) && iface_l3_device(iface));
+}
+
+// ── Seamless IP Rules and Routes ─────────────────────────────────────
+
+function active_ifaces() {
+	let active = {};
+	uci_foreach('interface', function(s) {
+		let device = validate_section_name(s['.name']) && uci_bool(s.enabled) ? iface_l3_device(s['.name']) : null;
+		if (device && validate_device_name(device)) active[s['.name']] = device;
+	});
+	return active;
+}
+
+function flush_commands(table_id, family) {
+	let ip_cmd = ip_family_cmd(family);
+	let routes = cmd_output(sprintf('%s route list table %d 2>/dev/null', ip_cmd, table_id));
+	return length(routes) ? [sprintf('%s route flush table %d', ip_cmd, table_id)] : [];
+}
+
+// Adds the rules and routes the configuration needs right away and returns the commands that retire the rest.
+// Those run after the new ruleset is live: a marked flow always finds its rule and route, old or new.
+function ip_additions(previous) {
+	let ownership = get_policy_ownership();
+	let owned = set_of([...previous.rule_prefs, ...ownership.rule_prefs]);
+	let active = active_ifaces();
+	let retire = [];
+	let live_tables = { ipv4: {}, ipv6: {} };
+
+	for (let iface, device in active)
+		create_iface_route(iface);
+
+	for (let family in ip_families()) {
+		let expected = general_rules();
+		for (let iface, device in active)
+			if (index(get_families(iface), family) >= 0) {
+				push(expected, ...iface_rules(iface, device));
+				live_tables[family][get_iface_table_id(iface)] = true;
+			}
+
+		let plan = reconcile.plan_rules(existing_rules(family), expected, owned);
+		for (let rule in plan.add) run(rule_command(family, 'add', rule));
+		push(retire, ...map(plan.del, rule => rule_command(family, 'del', rule)));
+
+		for (let table_id in uniq([...previous.tables, ...ownership.tables]))
+			if (!live_tables[family][table_id]) push(retire, ...flush_commands(table_id, family));
+	}
+	return retire;
+}
+
+// ── Seamless Reload ──────────────────────────────────────────────────
+
+// Applies the current configuration to the running service without a teardown. Everything that can be rejected
+// runs before the first live change, so an invalid configuration leaves the running state as it was.
+function reload_running() {
+	let previous = get_installed_policy_ownership();
+	let applied = continuity.load_applied();
+	let diff = classify_interfaces();
+
+	init_iface_hotplug_states([...diff.added, ...diff.changed]);
+	ensure_rule_ids();
+	let rules = collect_user_rules();
+	generate_nft(rules, true);
+
+	let plan = prepare_nft();
+	if (!plan) return false;
+
+	let retire = ip_additions(previous);
+	if (!commit_nft(plan)) return false;
+	for (let command in retire) run(command);
+
+	if (mptcp_signature() != applied.mptcp) apply_mptcp_config();
+	persist_globals();
+	persist_policy_ownership();
+	forget_interfaces(diff.removed);
+	sync_dnsmasq(rules);
+	prefetch_fresh(fresh_domains(rules, applied.domains, plan.created));
+	record_applied(rules);
+	return true;
+}
+
 // ── Method Assignment ────────────────────────────────────────────────
 
 mwan4.pkg = pkg;
@@ -6303,6 +6543,7 @@ mwan4.route_line_dev = route_line_dev;
 // Hotplug state
 mwan4.set_iface_hotplug_state = set_iface_hotplug_state;
 mwan4.init_iface_hotplug_states = init_iface_hotplug_states;
+mwan4.persist_globals = persist_globals;
 
 // nftables generation
 mwan4.set_general_rules = set_general_rules;
@@ -6320,6 +6561,24 @@ mwan4.set_user_rules = set_user_rules;
 mwan4.sync_dnsmasq = sync_dnsmasq;
 mwan4.prefetch_domains = prefetch_domains;
 mwan4.rebuild_dynamic = rebuild_dynamic;
+
+// Seamless apply
+mwan4.generate_nft = generate_nft;
+mwan4.prepare_nft = prepare_nft;
+mwan4.apply_nft = apply_nft;
+mwan4.fresh_domains = fresh_domains;
+mwan4.prefetch_fresh = prefetch_fresh;
+mwan4.classify_interfaces = classify_interfaces;
+mwan4.interface_signatures = interface_signatures;
+mwan4.tracker_instances = tracker_instances;
+mwan4.record_applied = record_applied;
+mwan4.mptcp_signature = mptcp_signature;
+mwan4.forget_interfaces = forget_interfaces;
+mwan4.stash_state = stash_state;
+mwan4.restore_state = restore_state;
+mwan4.ip_additions = ip_additions;
+mwan4.reload_running = reload_running;
+mwan4.commit_nft = commit_nft;
 
 // Interface management
 mwan4.create_iface_route = create_iface_route;

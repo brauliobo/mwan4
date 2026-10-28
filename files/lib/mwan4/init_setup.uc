@@ -29,20 +29,12 @@ m.init_iface_hotplug_states();
 // source addresses/devices are known.
 m.apply_mptcp_config();
 
-// Generate dynamic file (base structure + interfaces + strategies)
-m.rebuild_dynamic();
-
 // Rules need their persisted ids before the rules file records them in conntrack marks.
 m.ensure_rule_ids();
 
-// Generate rules file (sets + user rules)
+// Generate the dynamic file (base structure + interfaces + strategies) and the rules file (sets + user rules)
 let rules = m.collect_user_rules();
-m.nft_file('create', 'rules');
-m.set_dynamic_nftset();
-m.set_connected_ipv4();
-m.set_connected_ipv6();
-m.set_custom_nftset();
-m.set_user_rules(rules);
+m.generate_nft(rules);
 
 // dnsmasq must know the domain sets before fw4 reload prefetches them
 m.sync_dnsmasq(rules);
@@ -50,3 +42,6 @@ m.sync_dnsmasq(rules);
 // Validate combined and install (fw4 reload prefetches domain sets)
 m.nft_file('install', 'all');
 m.fw4_reload();
+
+// What a later reload compares against, and the trackers the init script starts
+m.record_applied(rules);
