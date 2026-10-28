@@ -1,0 +1,53 @@
+Testing the per-interface transition log: format, duplicate suppression, bounded atomic trimming, flap counts and availability.
+
+-- Testcase --
+import stability from 'stability';
+
+let log = () => global.mocklib.read_captured('/var/run/mwan4/history/wan');
+let T = 1000000;
+
+stability.history_append('wan', 'online', 'start', T);
+stability.history_append('wan', 'online', 'start', T + 5);
+stability.history_append('wan', 'offline', 'probe', T + 600);
+stability.history_append('wan', 'offline', 'ifdown', T + 601);
+stability.history_append('wan', 'online', 'recovered', T + 900);
+stability.history_append('wan', 'held', 'recovering from loss', T + 900);
+print('log:\n' + log());
+print('no temp file left: ' + !global.mocklib.has_captured('/var/run/mwan4/history/wan.tmp') + '\n');
+
+let events = stability.history_events('wan');
+print('events: ' + length(events) + ' first=' + events[0].state + ' reason=' + events[0].reason + '\n');
+
+let flaps = (window, now) => stability.history_flaps(events, window, now);
+print('flaps window 300 at T+950: ' + flaps(300, T + 950).count_window + '/' + flaps(300, T + 950).total + '\n');
+print('flaps window 600 at T+950: ' + flaps(600, T + 950).count_window + '/' + flaps(600, T + 950).total + '\n');
+print('flaps window 300 at T+2000: ' + flaps(300, T + 2000).count_window + '/' + flaps(300, T + 2000).total + '\n');
+
+// online T..T+600, offline T+600..T+900, online T+900..T+1800
+let avail = stability.availability(events, T + 1800);
+print('availability 1h: ' + avail.pct_1h + ' 24h: ' + avail.pct_24h + '\n');
+print('availability once the outage left the hour: ' + stability.availability(events, T + 4600).pct_1h + '\n');
+print('availability without data: ' + stability.availability([], T).pct_24h + '\n');
+
+for (let i = 0; i < 300; i++)
+	stability.history_append('flappy', i % 2 ? 'online' : 'offline', 'probe', T + i);
+let trimmed = stability.history_events('flappy');
+print('bounded: ' + length(trimmed) + ' oldest=' + (trimmed[0].time - T) + ' newest=' + (trimmed[length(trimmed) - 1].time - T) + '\n');
+-- End --
+
+-- Expect stdout --
+log:
+1000000 online start
+1000600 offline probe
+1000900 online recovered
+1000900 held recovering_from_loss
+no temp file left: true
+events: 4 first=online reason=start
+flaps window 300 at T+950: 0/1
+flaps window 600 at T+950: 1/1
+flaps window 300 at T+2000: 0/1
+availability 1h: 83.3 24h: 83.3
+availability once the outage left the hour: 100
+availability without data: null
+bounded: 200 oldest=100 newest=299
+-- End --

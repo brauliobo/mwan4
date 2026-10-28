@@ -7,9 +7,11 @@
 // Procd instance management (trackers, rtmon) stays in shell.
 
 import m from 'mwan4';
+import stability from 'stability';
 
 m.set_scriptname('mwan4-init');
 m.init();
+stability.history_restore();
 
 m.update_iface_to_table();
 m.set_general_rules();

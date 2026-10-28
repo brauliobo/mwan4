@@ -1,0 +1,129 @@
+Testing flap damping: a link that goes offline flap_threshold times inside flap_window is held out of the strategies until it stays healthy for flap_holddown, and the last usable link is never held.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00", "recovery_hold": "0" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"], "flap_threshold": "2", "flap_holddown": "60" }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wanb_r", "interface": "wanb", "metric": "2", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "failover", "use_route": ["wan_r", "wanb_r"] }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+import stability from 'stability';
+m.set_scriptname('test');
+m.init();
+m.update_iface_to_table();
+
+let now = 1000000;
+global.time = () => now;
+let at = t => { now = 1000000 + t; };
+
+function chain() {
+	m.rebuild_dynamic();
+	m.nft_file('install', 'dynamic');
+	let lines = split(global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft'), '\n');
+	let inside = false, out = [];
+	for (let l in lines) {
+		if (l == '\tchain mwan4_strategy_failover_ipv4 {') inside = true;
+		else if (inside && l == '\t}') break;
+		else if (inside) push(out, replace(replace(l, /.*comment "([^"]*)".*/, '$1'), /^\t+/, ''));
+	}
+	return join(' | ', out);
+}
+
+function connected(iface, first) {
+	m.set_iface_hotplug_state(iface, 'online');
+	stability.link_connected(iface, m.stability_opts(iface), first, now);
+}
+function disconnected(iface) {
+	m.set_iface_hotplug_state(iface, 'offline');
+	stability.link_disconnected(iface, 'probe', now);
+}
+function show(title) {
+	let h = stability.held_info('wan', now);
+	print(sprintf('%-30s held=%s reason=%s remaining=%d chain: %s\n', title, h.active, h.reason, h.remaining, chain()));
+}
+
+connected('wan', true);
+connected('wanb', true);
+show('start, both healthy');
+
+disconnected('wan'); at(10); connected('wan'); show('flap 1, recovered');
+at(20); disconnected('wan'); at(30); connected('wan'); show('flap 2, recovered');
+at(40); disconnected('wan'); show('flap 3, offline');
+at(50); connected('wan'); show('flap 3 recovered: suppressed');
+at(100); disconnected('wanb'); show('last usable link: hold lifted');
+at(110); connected('wanb'); show('wanb back, wan still held');
+
+at(150); print('expired at +100s: ' + stability.hold_expired('wan', now) + '\n');
+at(171); print('expired at +121s: ' + stability.hold_expired('wan', now) + '\n');
+print('release: ' + stability.link_released('wan', now) + '\n');
+show('released, wan joins');
+print('second release is a no-op: ' + stability.link_released('wan', now) + '\n');
+
+at(172); disconnected('wan'); at(180); connected('wan'); show('offline again inside the window');
+at(180 + 121); print('hold expires: ' + stability.hold_expired('wan', now) + '\n');
+at(1000); disconnected('wan'); at(1010); connected('wan'); show('quiet for a window: no hold');
+
+print('\nwanb threshold 2 / holddown 60:\n');
+let opts = m.stability_opts('wanb');
+print(sprintf('threshold=%d window=%d holddown=%d damping=%s\n', opts.flap_threshold, opts.flap_window, opts.flap_holddown, opts.flap_damping));
+
+print('\nflap_damping 0 never holds:\n');
+let events = stability.history_events('wan');
+print('hold with damping: ' + stability.hold_for(events, { ...m.stability_opts('wan'), flap_threshold: 2, recovery_hold: 0 }, 1000000 + 185)?.reason + '\n');
+print('hold without damping: ' + stability.hold_for(events, { ...m.stability_opts('wan'), flap_threshold: 2, flap_damping: false, recovery_hold: 0 }, 1000000 + 185)?.reason + '\n');
+print('flaps: ' + sprintf('%J', stability.history_flaps(events, 300, now)) + '\n');
+print('log:\n' + global.mocklib.read_captured('/var/run/mwan4/history/wan'));
+-- End --
+
+-- Expect stdout --
+start, both healthy            held=false reason=(null) remaining=0 chain: wan 1 1 | unreachable
+flap 1, recovered              held=false reason=(null) remaining=0 chain: wan 1 1 | unreachable
+flap 2, recovered              held=false reason=(null) remaining=0 chain: wan 1 1 | unreachable
+flap 3, offline                held=false reason=(null) remaining=0 chain: wanb 1 1 | unreachable
+flap 3 recovered: suppressed   held=true reason=flapping remaining=120 chain: wanb 1 1 | unreachable
+last usable link: hold lifted  held=true reason=flapping remaining=70 chain: wan 1 1 | unreachable
+wanb back, wan still held      held=true reason=flapping remaining=60 chain: wanb 1 1 | unreachable
+expired at +100s: false
+expired at +121s: true
+release: true
+released, wan joins            held=false reason=(null) remaining=0 chain: wan 1 1 | unreachable
+second release is a no-op: false
+offline again inside the window held=true reason=flapping remaining=120 chain: wanb 1 1 | unreachable
+hold expires: true
+quiet for a window: no hold    held=false reason=(null) remaining=0 chain: wan 1 1 | unreachable
+
+wanb threshold 2 / holddown 60:
+threshold=2 window=300 holddown=60 damping=true
+
+flap_damping 0 never holds:
+hold with damping: flapping
+hold without damping: null
+flaps: { "count_window": 1, "total": 5 }
+log:
+1000000 online start
+1000000 offline probe
+1000010 online recovered
+1000020 offline probe
+1000030 online recovered
+1000040 offline probe
+1000050 online recovered
+1000050 held flapping
+1000171 released flapping
+1000172 offline probe
+1000180 online recovered
+1000180 held flapping
+1001000 offline probe
+1001010 online recovered
+-- End --

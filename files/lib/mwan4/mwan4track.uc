@@ -5,6 +5,7 @@
 
 import { popen, readfile, writefile, stat, mkdir } from 'fs';
 import m from 'mwan4';
+import stability from 'stability';
 
 let uloop = require('uloop');
 
@@ -58,6 +59,7 @@ let down, up, pkt_size, max_ttl;
 let failure_interval, keep_failure_interval, recovery_interval;
 let check_quality, failure_latency, recovery_latency, failure_loss, recovery_loss;
 let track_ips;
+let quality_limits, quality_hold, quality;
 
 // ── Timer ────────────────────────────────────────────────────────────
 
@@ -147,6 +149,23 @@ function parse_httping_result(result) {
 	return { latency, loss };
 }
 
+// ── Stability ────────────────────────────────────────────────────────
+
+// Quality steering: the degraded set is shared through a state file, the hotplug handler rebuilds the strategies.
+function quality_cycle(probes) {
+	if (!check_quality || !length(quality_limits) || score <= up) return;
+	if (stability.quality_step(quality, stability.quality_sample(probes), quality_limits, quality_hold, time())) {
+		stability.quality_write(INTERFACE, quality.degraded);
+		hotplug('quality');
+	}
+}
+
+// A held link rejoins the strategies once it has stayed healthy for the whole hold.
+function release_cycle() {
+	if (stability.hold_expired(INTERFACE, time()))
+		hotplug('released');
+}
+
 // ── State Transitions ────────────────────────────────────────────────
 
 function stopped() {
@@ -167,6 +186,7 @@ function disconnected(first) {
 	ws('OFFLINE', m.get_uptime());
 	ws('ONLINE', '0');
 	score = 0;
+	quality = stability.quality_state();
 	if (first) return;
 
 	if (prev == 'online' || prev == 'disconnecting') {
@@ -186,6 +206,7 @@ function connected(first) {
 	host_up_count = 0;
 	lost = 0;
 	turn = 0;
+	quality = stability.quality_state();
 	m.LOG('notice', 'Interface', INTERFACE, '(' + DEVICE + ') is online');
 	hotplug('connected', first ? 'FIRSTCONNECT=1' : null);
 }
@@ -388,6 +409,7 @@ track_cycle = function() {
 	host_up_count = 0;
 
 	// Run probes
+	let probes = [];
 	for (let track_ip in track_ips) {
 		if (host_up_count >= reliability) {
 			writefile(status_dir + '/TRACK_' + track_ip, 'skipped\n');
@@ -395,6 +417,7 @@ track_cycle = function() {
 		}
 
 		let p = run_probe(track_ip);
+		push(probes, p);
 		let do_log = '';
 
 		if (!check_quality) {
@@ -463,6 +486,10 @@ track_cycle = function() {
 		}
 	}
 
+	quality_cycle(probes);
+	if (host_up_count >= reliability && score > up)
+		release_cycle();
+
 	turn++;
 	ws('LOST', lost);
 	ws('SCORE', score);
@@ -518,6 +545,9 @@ failure_latency   = int(m.uci_get(INTERFACE, 'failure_latency'))   || 1000;
 recovery_latency  = int(m.uci_get(INTERFACE, 'recovery_latency'))  || 500;
 failure_loss      = int(m.uci_get(INTERFACE, 'failure_loss'))      || 40;
 recovery_loss     = int(m.uci_get(INTERFACE, 'recovery_loss'))     || 10;
+quality_limits = m.quality_limits(INTERFACE);
+quality_hold   = m.stability_opts(INTERFACE).quality_hold;
+quality        = stability.quality_state();
 
 track_ips = [];
 for (let target in m.uci_get_list(INTERFACE, 'track_ip')) {

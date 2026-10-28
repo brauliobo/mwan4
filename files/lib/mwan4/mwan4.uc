@@ -8,6 +8,7 @@ import { cursor } from 'uci';
 import package_ctl from 'packages';
 import dnsmasq from 'dnsmasq';
 import connections from 'connections';
+import stability from 'stability';
 
 // Forward declarations — defined later but referenced by the export block.
 // ucode does not hoist function declarations.
@@ -1757,6 +1758,84 @@ function get_routes(family) {
 	return routes;
 }
 
+// ── Link Stability ───────────────────────────────────────────────────
+
+const BOOL_VALUES = ['0', '1', 'yes', 'no', 'on', 'off', 'true', 'false'];
+
+function valid_stability_value(name, value) {
+	if (name == 'flap_damping') return value != null && index(BOOL_VALUES, lc('' + value)) >= 0;
+	return validate_uint_range(value, ...stability.RANGES[name]);
+}
+
+// Interface option, else the same option in globals, else the built-in default; invalid values are skipped
+// (validate reports them).
+function stability_opts(iface) {
+	let opts = {};
+	for (let name, fallback in stability.DEFAULTS) {
+		let value = filter([uci_get(iface, name), uci_get('globals', name)], v => valid_stability_value(name, v))[0] ?? fallback;
+		opts[name] = name == 'flap_damping' ? uci_bool(value) : int(value);
+	}
+	return opts;
+}
+
+// Limits of every strategy that routes over this interface.
+function quality_limits(iface) {
+	let routes = uci_section_map('route');
+	let limits = [];
+	uci_foreach('strategy', function(s) {
+		let limit = {
+			strategy:    s['.name'],
+			max_latency: validate_uint_range(s.max_latency, 1, 4294967295) ? int(s.max_latency) : null,
+			max_loss:    validate_uint_range(s.max_loss, 0, 100) ? int(s.max_loss) : null,
+		};
+		let uses = length(filter(as_list(s.use_route), r => routes[r]?.interface == iface)) > 0;
+		if (uses && (limit.max_latency || limit.max_loss != null))
+			push(limits, limit);
+	});
+	return limits;
+}
+
+function link_stability(iface, events) {
+	let now = time();
+	return {
+		'flaps':        stability.history_flaps(events, stability_opts(iface).flap_window, now),
+		'availability': stability.availability(events, now),
+		'held':         stability.held_info(iface, now),
+		'degraded_for': sort(keys(stability.quality_read(iface))),
+	};
+}
+
+function stability_note(iface) {
+	let data = link_stability(iface, stability.history_events(iface));
+	let notes = [];
+	if (data.held.active) push(notes, sprintf('held (%s, %ds left)', data.held.reason, data.held.remaining));
+	if (length(data.degraded_for)) push(notes, 'degraded for ' + join(',', data.degraded_for));
+	if (data.flaps.count_window) push(notes, sprintf('%d flaps in %ds', data.flaps.count_window, stability_opts(iface).flap_window));
+	if (data.availability.pct_24h != null && data.availability.pct_24h < 100) push(notes, sprintf('availability 24h %.1f%%', data.availability.pct_24h));
+	return length(notes) ? ', ' + join(', ', notes) : '';
+}
+
+// Transitions of the last `limit` events since `since`, oldest first, per configured interface.
+function get_link_history(args) {
+	_ensure_init();
+	args = args || {};
+	let limit = min(max(int(args.limit) || 100, 1), stability.HISTORY_MAX);
+	let since = int(args.since) || 0;
+	let interfaces = {};
+
+	uci_foreach('interface', function(s) {
+		let iface = s['.name'];
+		if (args.interface != null && args.interface != iface) return;
+		let events = stability.history_events(iface);
+		interfaces[iface] = {
+			'events': slice(filter(events, e => e.time >= since), -limit),
+			...link_stability(iface, events),
+		};
+	});
+
+	return { 'ok': true, 'interfaces': interfaces };
+}
+
 // ── Hotplug State ────────────────────────────────────────────────────
 
 function set_iface_hotplug_state(iface, state) {
@@ -2210,6 +2289,26 @@ function rebuild_iface_nftfile() {
 
 // ── nftables Strategies ──────────────────────────────────────────────
 
+// What a strategy knows about a route's link: tracker health plus the holds and quality skips that keep it out.
+function route_state(iface, strategy_name) {
+	return {
+		online: get_iface_hotplug_state(iface) == 'online',
+		held:   stability.held_info(iface, time()).active,
+		ratio:  stability.quality_read(iface)[strategy_name] ?? null,
+	};
+}
+
+// Online routes outside a hold and outside degradation. A strategy is never emptied by them: with every online
+// route held the holds are lifted, and with every candidate degraded only the least bad one stays.
+function usable_routes(routes) {
+	let online = filter(routes, r => r.online);
+	let settled = filter(online, r => !r.held);
+	let candidates = length(settled) ? settled : online;
+	let good = filter(candidates, r => r.ratio == null);
+	if (length(good) || !length(candidates)) return good;
+	return [sort(candidates, (a, b) => a.ratio - b.ratio)[0]];
+}
+
 function _create_strategy_chain(strategy_name, accumulator, counter_defs, counter_seen) { // ucode-lsp disable
 	let last_resort = uci_get(strategy_name, 'last_resort') || 'unreachable';
 	let last_resort_mark;
@@ -2269,11 +2368,11 @@ function _create_strategy_chain(strategy_name, accumulator, counter_defs, counte
 			warn_invalid('device name', device, sprintf('interface %s', iface));
 			device = null;
 		}
-		let is_online = (get_iface_hotplug_state(iface) == 'online');
+		let state = route_state(iface, strategy_name);
 
 		for (let family in get_families(iface)) {
 			if (family == 'ipv6' && mwan4.no_ipv6 != 0) continue;
-			push(family_routes[family], { iface, metric, weight, mark, device, is_online });
+			push(family_routes[family], { iface, metric, weight, mark, device, ...state });
 		}
 	}
 
@@ -2285,15 +2384,15 @@ function _create_strategy_chain(strategy_name, accumulator, counter_defs, counte
 
 		push(L, sprintf('\tchain %s_strategy_%s_%s {', NFT_PREFIX, strategy_name, family));
 
-		// Find routes at lowest metric that are online
+		// Find routes at lowest metric that are usable
 		let routes = family_routes[family];
-		let online = filter(routes, r => r.is_online);
+		let usable = usable_routes(routes);
 
-		if (length(online)) {
+		if (length(usable)) {
 			// Sort by metric, pick lowest
-			sort(online, (a, b) => a.metric - b.metric);
-			let lowest = online[0].metric;
-			let active = filter(online, r => r.metric == lowest);
+			sort(usable, (a, b) => a.metric - b.metric);
+			let lowest = usable[0].metric;
+			let active = filter(usable, r => r.metric == lowest);
 			let total_weight = 0;
 			for (let r in active) total_weight += r.weight;
 
@@ -2315,7 +2414,7 @@ function _create_strategy_chain(strategy_name, accumulator, counter_defs, counte
 			}
 		} else {
 			// All offline: add device-based defaults for any with devices
-			let offline_with_dev = filter(routes, r => !r.is_online && r.device);
+			let offline_with_dev = filter(routes, r => !r.online && r.device);
 			for (let r in offline_with_dev) {
 				let counter = nft_add_counter(counter_defs, counter_seen, 'strategy', strategy_name, family, 'out', r.iface);
 				push(L, sprintf('\t\toifname "%s" meta mark & %s == 0 %s meta mark set %s comment "out %s %s"',
@@ -5789,6 +5888,7 @@ function explain_strategy_decision(strategy_name, family) {
 		if (!iface || index(get_families(iface), family) < 0)
 			continue;
 		let state = get_iface_hotplug_state(iface);
+		let runtime = route_state(iface, strategy_name);
 		push(candidates, {
 			'route':     route_name,
 			'interface': iface,
@@ -5797,14 +5897,17 @@ function explain_strategy_decision(strategy_name, family) {
 			'weight':    int(route.weight || '1'),
 			'enabled':   uci_bool(uci_get(iface, 'enabled')),
 			'state':     state,
-			'online':    state == 'online',
+			'online':    runtime.online,
+			'held':      runtime.held,
+			'degraded':  runtime.ratio != null,
+			'ratio':     runtime.ratio,
 			'mark':      get_iface_mark(iface),
 			'table_id':  get_iface_table_id(iface),
 			'device':    network_get_device(iface) || null,
 		});
 	}
 
-	let active = filter(candidates, c => c.online);
+	let active = usable_routes(candidates);
 	sort(active, (a, b) => a.metric - b.metric);
 	if (length(active)) {
 		let lowest = active[0].metric;
@@ -6225,6 +6328,10 @@ mwan4.interface_hotplug_shutdown = interface_hotplug_shutdown;
 mwan4.interface_shutdown = interface_shutdown;
 mwan4.ifup = ifup;
 mwan4.flush_conntrack = flush_conntrack;
+mwan4.stability_opts = stability_opts;
+mwan4.quality_limits = quality_limits;
+mwan4.link_stability = link_stability;
+mwan4.get_link_history = get_link_history;
 mwan4.track_clean = track_clean;
 
 export default mwan4;

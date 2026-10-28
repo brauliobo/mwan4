@@ -14,7 +14,7 @@ if command -v ucode >/dev/null 2>&1; then
 	patch_dir="/tmp/mwan4_test_modules.$$"
 	mkdir -p "$patch_dir"
 
-	for module in mwan4 packages dnsmasq pbr_import connections; do
+	for module in mwan4 packages dnsmasq pbr_import connections stability; do
 		awk '
 			/^import \{ .* \} from .(fs|uci).;$/ {
 				mod = $0; sub(/.*from \x27/, "", mod); sub(/\x27;.*/, "", mod)

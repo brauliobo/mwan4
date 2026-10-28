@@ -1,0 +1,115 @@
+Testing the failback hold: a recovered link joins the strategies only after staying healthy for recovery_hold, a failure during the hold restarts it, first start never holds, and recovery_hold 0 restores the immediate failback.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00", "flap_damping": "0" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"] },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"], "recovery_hold": "0" }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wanb_r", "interface": "wanb", "metric": "2", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "failover", "use_route": ["wan_r", "wanb_r"] },
+		{ ".name": "balanced", "use_route": ["wan_r", "wanb_r"] }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+import stability from 'stability';
+m.set_scriptname('test');
+m.init();
+m.update_iface_to_table();
+
+let now = 1000000;
+global.time = () => now;
+let at = t => { now = 1000000 + t; };
+
+function chain() {
+	m.rebuild_dynamic();
+	m.nft_file('install', 'dynamic');
+	let lines = split(global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft'), '\n');
+	let inside = false, out = [];
+	for (let l in lines) {
+		if (l == '\tchain mwan4_strategy_failover_ipv4 {') inside = true;
+		else if (inside && l == '\t}') break;
+		else if (inside) push(out, replace(replace(l, /.*comment "([^"]*)".*/, '$1'), /^\t+/, ''));
+	}
+	return join(' | ', out);
+}
+
+function connected(iface, first) {
+	m.set_iface_hotplug_state(iface, 'online');
+	stability.link_connected(iface, m.stability_opts(iface), first, now);
+}
+function disconnected(iface) {
+	m.set_iface_hotplug_state(iface, 'offline');
+	stability.link_disconnected(iface, 'probe', now);
+}
+function show(title) {
+	let h = stability.held_info('wan', now);
+	print(sprintf('%-32s held=%s reason=%s until=%s remaining=%d chain: %s\n', title, h.active, h.reason, h.until, h.remaining, chain()));
+}
+
+let opts = m.stability_opts('wan');
+print(sprintf('defaults: recovery_hold=%d flap_damping=%s flush_grace=%d quality_hold=%d\n', opts.recovery_hold, opts.flap_damping, opts.flush_grace, opts.quality_hold));
+
+connected('wan', true);
+connected('wanb', true);
+show('first start joins at once');
+
+at(100); disconnected('wan'); show('wan down');
+at(200); connected('wan'); show('wan up: held recovering');
+at(215); disconnected('wan'); show('fails during the hold');
+at(230); connected('wan'); show('up again: hold restarted');
+at(259); print('expired after 29s: ' + stability.hold_expired('wan', now) + '\n');
+at(260); print('expired after 30s: ' + stability.hold_expired('wan', now) + '\n');
+show('chain at expiry before release');
+print('release: ' + stability.link_released('wan', now) + '\n');
+show('released');
+
+print('\nmwan4 restart with history of an outage:\n');
+at(300); disconnected('wan');
+at(310); connected('wan', true);
+show('restart: healthy link joins');
+
+print('\nlink with recovery_hold 0 (wanb):\n');
+at(400); disconnected('wanb'); at(410); connected('wanb');
+print('held: ' + stability.held_info('wanb', now).active + '\n');
+print('log:\n' + global.mocklib.read_captured('/var/run/mwan4/history/wan'));
+-- End --
+
+-- Expect stdout --
+defaults: recovery_hold=30 flap_damping=false flush_grace=10 quality_hold=30
+first start joins at once        held=false reason=(null) until=(null) remaining=0 chain: wan 1 1 | unreachable
+wan down                         held=false reason=(null) until=(null) remaining=0 chain: wanb 1 1 | unreachable
+wan up: held recovering          held=true reason=recovering until=1000230 remaining=30 chain: wanb 1 1 | unreachable
+fails during the hold            held=false reason=(null) until=(null) remaining=0 chain: wanb 1 1 | unreachable
+up again: hold restarted         held=true reason=recovering until=1000260 remaining=30 chain: wanb 1 1 | unreachable
+expired after 29s: false
+expired after 30s: true
+chain at expiry before release   held=false reason=(null) until=(null) remaining=0 chain: wan 1 1 | unreachable
+release: true
+released                         held=false reason=(null) until=(null) remaining=0 chain: wan 1 1 | unreachable
+
+mwan4 restart with history of an outage:
+restart: healthy link joins      held=false reason=(null) until=(null) remaining=0 chain: wan 1 1 | unreachable
+
+link with recovery_hold 0 (wanb):
+held: false
+log:
+1000000 online start
+1000100 offline probe
+1000200 online recovered
+1000200 held recovering
+1000215 offline probe
+1000230 online recovered
+1000230 held recovering
+1000260 released recovering
+1000300 offline probe
+1000310 online start
+-- End --

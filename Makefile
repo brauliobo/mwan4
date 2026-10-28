@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mwan4
 PKG_VERSION:=0.1.1
-PKG_RELEASE:=27
+PKG_RELEASE:=28
 PKG_LICENSE:=AGPL-3.0-or-later
 PKG_MAINTAINER:=Stan Grishin <stangri@melmac.ca>
 
@@ -88,6 +88,8 @@ define Package/mwan4/install
 	$(INSTALL_DATA) ./files/lib/mwan4/dnsmasq.uc \
 		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/connections.uc \
+		$(1)/lib/mwan4/
+	$(INSTALL_DATA) ./files/lib/mwan4/stability.uc \
 		$(1)/lib/mwan4/
 	$(INSTALL_DATA) ./files/lib/mwan4/pbr_import.uc \
 		$(1)/lib/mwan4/

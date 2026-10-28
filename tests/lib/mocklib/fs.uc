@@ -114,5 +114,13 @@ return {
 		return true;
 	},
 
+	rename: function(from, to) {
+		mocklib.capture(to, mocklib.read_captured(from));
+		mocklib.delete_captured(from);
+		mocklib.trace_call("fs", "rename", { from, to });
+
+		return true;
+	},
+
 	error: () => "Unspecified error"
 };

@@ -3,7 +3,10 @@
 # Copyright 2026 MOSSDeF, Stan Grishin (stangri@melmac.ca).
 # Based on original mwan3 by Florian Eckert <fe@dev.tdt.de>
 
-[ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifdown" ] || [ "$ACTION" = "connected" ] || [ "$ACTION" = "disconnected" ] || exit 1
+case "$ACTION" in
+	ifup|ifdown|connected|disconnected|released|quality) ;;
+	*) exit 1 ;;
+esac
 [ -n "$INTERFACE" ] || exit 2
 [ "$MWAN4_SHUTDOWN" = "1" ] && exit 0
 

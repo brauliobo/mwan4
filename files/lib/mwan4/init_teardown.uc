@@ -6,6 +6,7 @@
 // Called by init.d/mwan4 stop_service to tear down nftables, routes and rules.
 
 import m from 'mwan4';
+import stability from 'stability';
 
 m.set_scriptname('mwan4-init');
 m.init();
@@ -39,5 +40,6 @@ for (let family in ['ipv4', 'ipv6']) {
 m.nft_file('delete', 'all');
 system('rm -f /var/run/mwan4.nft*');
 
-// Remove status directories
+// Remove status directories, keeping the link history for the next start
+stability.history_stash();
 system('rm -rf /var/run/mwan4 /var/run/mwan4track');

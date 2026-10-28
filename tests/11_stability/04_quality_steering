@@ -1,0 +1,158 @@
+Testing quality steering: smoothed latency/loss beyond a strategy limit skips that link in that strategy only, with hysteresis, never emptying a strategy, and rebuilding the nft only when the degraded set changes.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00", "quality_hold": "30" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"], "check_quality": "1" },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"], "check_quality": "1" }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wanb_r", "interface": "wanb", "metric": "2", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "fast", "use_route": ["wan_r", "wanb_r"], "max_latency": "100" },
+		{ ".name": "clean", "use_route": ["wan_r", "wanb_r"], "max_loss": "5" },
+		{ ".name": "plain", "use_route": ["wan_r", "wanb_r"] },
+		{ ".name": "solo", "use_route": ["wan_r"], "max_latency": "100" }
+	]
+}
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+import stability from 'stability';
+m.set_scriptname('test');
+m.init();
+m.update_iface_to_table();
+
+let now = 1000000;
+global.time = () => now;
+let at = t => { now = 1000000 + t; };
+
+function chains() {
+	m.rebuild_dynamic();
+	m.nft_file('install', 'dynamic');
+	let lines = split(global.mocklib.read_captured('/usr/share/nftables.d/ruleset-post/10-mwan4.nft'), '\n');
+	let current = null, out = {};
+	for (let l in lines) {
+		let c = match(l, /^\tchain mwan4_strategy_(\w+)_ipv4 \{/);
+		if (c) { current = c[1]; out[current] = []; }
+		else if (current && l == '\t}') current = null;
+		else if (current) push(out[current], replace(replace(l, /.*comment "([^"]*)".*/, '$1'), /^\t+/, ''));
+	}
+	return join('  ', map(sort(keys(out)), k => k + '=' + split(out[k][0], ' ')[0]));
+}
+
+m.set_iface_hotplug_state('wan', 'online');
+m.set_iface_hotplug_state('wanb', 'online');
+
+let limits = m.quality_limits('wan');
+print('limits of wan: ' + join(', ', map(limits, l => sprintf('%s(lat=%s loss=%s)', l.strategy, l.max_latency, l.max_loss))) + '\n');
+print('limits of wanb: ' + join(', ', map(m.quality_limits('wanb'), l => l.strategy)) + '\n');
+
+let state = stability.quality_state();
+let hold = m.stability_opts('wan').quality_hold;
+let cycle = (t, latency, loss) => {
+	at(t);
+	let changed = stability.quality_step(state, { latency, loss }, limits, hold, now);
+	if (changed) stability.quality_write('wan', state.degraded);
+	print(sprintf('t=%-4d lat=%-4s loss=%-3d changed=%-5s degraded=%s  %s\n', t, latency, loss, changed, join(',', sort(keys(state.degraded))), chains()));
+};
+
+print('\n-- smoothing: a window of three samples is needed and a spike averaged below the limit does not degrade\n');
+cycle(0, 20, 0); cycle(5, 20, 0); cycle(10, 250, 0); cycle(15, 20, 0); cycle(20, 20, 0);
+print('\n-- sustained latency\n');
+cycle(25, 300, 0); cycle(30, 300, 0); cycle(35, 300, 0);
+print('\n-- unchanged set: no rebuild signal\n');
+cycle(40, 310, 0);
+print('\n-- loss joins\n');
+cycle(45, 300, 40); cycle(50, 300, 40);
+print('\n-- recovery needs <80% of the limit for quality_hold seconds\n');
+cycle(55, 90, 0); cycle(60, 90, 0); cycle(65, 90, 0); cycle(70, 70, 0); cycle(75, 70, 0);
+cycle(80, 70, 0);
+print('now ' + now + ', below since ' + sprintf('%J', state.below) + '\n');
+cycle(105, 70, 0);
+cycle(106, 70, 0);
+cycle(120, 70, 0);
+print('\n-- a bounce above 80% restarts the hold\n');
+cycle(125, 400, 0); cycle(130, 400, 0); cycle(135, 400, 0);
+cycle(140, 70, 0); cycle(145, 70, 0); cycle(150, 70, 0); cycle(155, 85, 0); cycle(160, 85, 0); cycle(165, 85, 0);
+print('state after bounce: ' + sprintf('%J', state.below) + '\n');
+
+print('\n-- all candidates degraded: least bad stays, never an empty strategy\n');
+m.set_iface_hotplug_state('wanb', 'offline');
+print('wanb offline: ' + chains() + '\n');
+m.set_iface_hotplug_state('wanb', 'online');
+stability.quality_write('wanb', { fast: 3.5, clean: 1.2 });
+stability.quality_write('wan', { fast: 2.0, clean: 9.0 });
+print('both degraded: ' + chains() + '\n');
+print('status degraded_for wan: ' + join(',', m.link_stability('wan', [])['degraded_for']) + '\n');
+stability.quality_clear('wan');
+print('wan restored: ' + chains() + '\n');
+
+print('\n-- sample building\n');
+print(sprintf('%J\n', stability.quality_sample([{ result: 0, latency: 20, loss: 0 }, { result: 0, latency: 40, loss: 50 }])));
+print(sprintf('%J\n', stability.quality_sample([{ result: 1, latency: 999999, loss: 100 }, { result: 0, latency: 30, loss: null }])));
+print(sprintf('%J\n', stability.quality_sample([{ result: 1, latency: 999999, loss: 100 }])));
+-- End --
+
+-- Expect stdout --
+limits of wan: fast(lat=100 loss=(null)), clean(lat=(null) loss=5), solo(lat=100 loss=(null))
+limits of wanb: fast, clean
+
+-- smoothing: a window of three samples is needed and a spike averaged below the limit does not degrade
+t=0    lat=20   loss=0   changed=false degraded=  clean=wan  fast=wan  plain=wan  solo=wan
+t=5    lat=20   loss=0   changed=false degraded=  clean=wan  fast=wan  plain=wan  solo=wan
+t=10   lat=250  loss=0   changed=false degraded=  clean=wan  fast=wan  plain=wan  solo=wan
+t=15   lat=20   loss=0   changed=false degraded=  clean=wan  fast=wan  plain=wan  solo=wan
+t=20   lat=20   loss=0   changed=false degraded=  clean=wan  fast=wan  plain=wan  solo=wan
+
+-- sustained latency
+t=25   lat=300  loss=0   changed=true  degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+t=30   lat=300  loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+t=35   lat=300  loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+
+-- unchanged set: no rebuild signal
+t=40   lat=310  loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+
+-- loss joins
+t=45   lat=300  loss=40  changed=true  degraded=clean,fast,solo  clean=wanb  fast=wanb  plain=wan  solo=wan
+t=50   lat=300  loss=40  changed=false degraded=clean,fast,solo  clean=wanb  fast=wanb  plain=wan  solo=wan
+
+-- recovery needs <80% of the limit for quality_hold seconds
+t=55   lat=90   loss=0   changed=false degraded=clean,fast,solo  clean=wanb  fast=wanb  plain=wan  solo=wan
+t=60   lat=90   loss=0   changed=false degraded=clean,fast,solo  clean=wanb  fast=wanb  plain=wan  solo=wan
+t=65   lat=90   loss=0   changed=false degraded=clean,fast,solo  clean=wanb  fast=wanb  plain=wan  solo=wan
+t=70   lat=70   loss=0   changed=false degraded=clean,fast,solo  clean=wanb  fast=wanb  plain=wan  solo=wan
+t=75   lat=70   loss=0   changed=false degraded=clean,fast,solo  clean=wanb  fast=wanb  plain=wan  solo=wan
+t=80   lat=70   loss=0   changed=false degraded=clean,fast,solo  clean=wanb  fast=wanb  plain=wan  solo=wan
+now 1000080, below since { "clean": 1000065, "fast": 1000075, "solo": 1000075 }
+t=105  lat=70   loss=0   changed=true  degraded=  clean=wan  fast=wan  plain=wan  solo=wan
+t=106  lat=70   loss=0   changed=false degraded=  clean=wan  fast=wan  plain=wan  solo=wan
+t=120  lat=70   loss=0   changed=false degraded=  clean=wan  fast=wan  plain=wan  solo=wan
+
+-- a bounce above 80% restarts the hold
+t=125  lat=400  loss=0   changed=true  degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+t=130  lat=400  loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+t=135  lat=400  loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+t=140  lat=70   loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+t=145  lat=70   loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+t=150  lat=70   loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+t=155  lat=85   loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+t=160  lat=85   loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+t=165  lat=85   loss=0   changed=false degraded=fast,solo  clean=wan  fast=wanb  plain=wan  solo=wan
+state after bounce: { }
+
+-- all candidates degraded: least bad stays, never an empty strategy
+wanb offline: clean=wan  fast=wan  plain=wan  solo=wan
+both degraded: clean=wanb  fast=wan  plain=wan  solo=wan
+status degraded_for wan: clean,fast
+wan restored: clean=wan  fast=wan  plain=wan  solo=wan
+
+-- sample building
+{ "latency": 30.0, "loss": 25.0 }
+{ "latency": 30.0, "loss": 50.0 }
+{ "latency": null, "loss": 100.0 }
+-- End --

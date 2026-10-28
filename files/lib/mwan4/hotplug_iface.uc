@@ -5,6 +5,7 @@
 
 import { readfile } from 'fs';
 import m from 'mwan4';
+import stability from 'stability';
 
 m.set_scriptname('mwan4-hotplug');
 m.init();
@@ -13,6 +14,7 @@ let ACTION = getenv('ACTION');
 let INTERFACE = getenv('INTERFACE');
 let DEVICE = getenv('DEVICE');
 let MWAN4_STARTUP = getenv('MWAN4_STARTUP');
+let FIRSTCONNECT = getenv('FIRSTCONNECT') == '1';
 
 // Check interface enabled
 let enabled = m.uci_bool(m.uci_get(INTERFACE, 'enabled'));
@@ -61,13 +63,19 @@ function signal_trackers(signame) {
 	}
 }
 
-switch (ACTION) {
-case 'connected':
-	m.set_iface_hotplug_state(INTERFACE, 'online');
-	if (!setup_ready()) exit(0);
+// Strategies read the hold and quality state files, so changing them only needs a rebuild.
+function apply_strategies() {
 	m.rebuild_dynamic();
 	m.nft_file('install', 'dynamic');
 	m.fw4_reload();
+}
+
+switch (ACTION) {
+case 'connected':
+	m.set_iface_hotplug_state(INTERFACE, 'online');
+	stability.link_connected(INTERFACE, m.stability_opts(INTERFACE), FIRSTCONNECT, time());
+	if (!setup_ready()) exit(0);
+	apply_strategies();
 	break;
 
 case 'ifup':
@@ -77,30 +85,37 @@ case 'ifup':
 	m.create_iface_route(INTERFACE);
 	if (MWAN4_STARTUP != 'init') {
 		m.set_general_rules();
-		m.rebuild_dynamic();
-		m.nft_file('install', 'dynamic');
-		m.fw4_reload();
+		apply_strategies();
 	}
 	signal_trackers('USR2');
 	break;
 
 case 'disconnected':
 	m.set_iface_hotplug_state(INTERFACE, 'offline');
+	stability.link_disconnected(INTERFACE, 'probe', time());
 	if (!setup_ready()) exit(0);
-	m.rebuild_dynamic();
-	m.nft_file('install', 'dynamic');
-	m.fw4_reload();
+	apply_strategies();
 	break;
 
 case 'ifdown':
 	m.set_iface_hotplug_state(INTERFACE, 'offline');
+	stability.link_disconnected(INTERFACE, 'ifdown', time());
 	if (!setup_ready()) exit(0);
 	m.delete_iface_rules(INTERFACE);
 	m.delete_iface_route(INTERFACE);
 	signal_trackers('USR1');
-	m.rebuild_dynamic();
-	m.nft_file('install', 'dynamic');
-	m.fw4_reload();
+	apply_strategies();
+	break;
+
+case 'released':
+	if (stability.link_released(INTERFACE, time()) && setup_ready())
+		apply_strategies();
+	break;
+
+case 'quality':
+	stability.link_quality_changed(INTERFACE, time());
+	if (setup_ready())
+		apply_strategies();
 	break;
 }
 
