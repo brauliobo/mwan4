@@ -1,0 +1,105 @@
+Testing the hand-over of a stop to the following start: tracker verdicts and holds of interfaces that still exist and are up are stashed and put back when the stash is young enough; stale stashes and interfaces that are gone or down are ignored.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4", "ipv6"], "track_ip": ["1.1.1.1"] },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"], "track_ip": ["8.8.8.8"] },
+		{ ".name": "wanc", "enabled": "0", "id": "3", "table_id": "3", "mark": "0x300", "family": ["ipv4"], "track_ip": ["8.8.4.4"] }
+	]
+}
+-- End --
+
+-- File ubus/network.interface.wanb~status.json --
+{ "up": false, "l3_device": "eth1", "device": "eth1" }
+-- End --
+
+-- File ubus/network.interface.wanc~status.json --
+{ "up": true, "l3_device": "eth2", "device": "eth2" }
+-- End --
+
+-- Testcase --
+let ubus = require('ubus');
+let connect = ubus.connect;
+ubus.connect = () => {
+	let conn = connect();
+	let call = conn.call;
+	conn.call = (object, method, args) => match(object, /_[46]$/) ? null : call(object, method, args);
+	return conn;
+};
+
+import m from 'mwan4';
+let mocklib = global.mocklib;
+let commands = [];
+global.system = cmd => { if (index(cmd, 'logger') != 0) push(commands, cmd); return 0; };
+
+m.set_scriptname('test');
+m.init();
+
+function put(path, data) { mocklib.capture(path, data + '\n'); }
+function get(path) { return mocklib.has_captured(path) ? trim(mocklib.read_captured(path)) : '-'; }
+function wipe(dir) {
+	for (let name in mocklib.list_captured(dir) ?? []) {
+		wipe(dir + '/' + name);
+		mocklib.delete_captured(dir + '/' + name);
+	}
+}
+
+// State of the running service
+for (let dir in ['wan_ipv4', 'wan_ipv6', 'wanb_ipv4', 'wanc_ipv4', 'gone_ipv4']) {
+	put('/var/run/mwan4track/' + dir + '/STATUS', 'online');
+	put('/var/run/mwan4track/' + dir + '/SCORE', '9');
+	put('/var/run/mwan4track/' + dir + '/ONLINE', '120');
+	put('/var/run/mwan4track/' + dir + '/PID', '4242');
+	put('/var/run/mwan4track/' + dir + '/TRACK_1.1.1.1', 'up');
+}
+put('/var/run/mwan4/held/wan', 'flapping 1793180000');
+put('/var/run/mwan4/held/gone', 'recovering 1793180000');
+put('/var/run/mwan4/quality/wan', 'wan_only 1.50');
+
+m.stash_state();
+print('stashed: ' + join(',', mocklib.list_captured('/var/run/mwan4.state')) + '\n');
+print('stashed trackers: ' + join(',', mocklib.list_captured('/var/run/mwan4.state/track')) + '\n');
+print('stashed files of a tracker: ' + join(',', mocklib.list_captured('/var/run/mwan4.state/track/wan_ipv4')) + '\n');
+
+// stop wipes the live state
+for (let dir in ['/var/run/mwan4track', '/var/run/mwan4/held', '/var/run/mwan4/quality'])
+	wipe(dir);
+
+// The start comes back 60 seconds later (the mock clock is fixed): wan is up, wanb is down, wanc is disabled
+m.restore_state();
+print('restored wan_ipv4: ' + get('/var/run/mwan4track/wan_ipv4/STATUS') + ' score ' + get('/var/run/mwan4track/wan_ipv4/SCORE') + ' online ' + get('/var/run/mwan4track/wan_ipv4/ONLINE') + '\n');
+print('restored wan_ipv6: ' + get('/var/run/mwan4track/wan_ipv6/STATUS') + '\n');
+print('probe results are not carried: ' + get('/var/run/mwan4track/wan_ipv4/TRACK_1.1.1.1') + ' pid ' + get('/var/run/mwan4track/wan_ipv4/PID') + '\n');
+print('wanb is down: ' + get('/var/run/mwan4track/wanb_ipv4/STATUS') + '\n');
+print('wanc is disabled: ' + get('/var/run/mwan4track/wanc_ipv4/STATUS') + '\n');
+print('removed interface: ' + get('/var/run/mwan4track/gone_ipv4/STATUS') + ' / hold ' + get('/var/run/mwan4/held/gone') + '\n');
+print('hold: ' + get('/var/run/mwan4/held/wan') + '\n');
+print('quality: ' + get('/var/run/mwan4/quality/wan') + '\n');
+print('stash removed: ' + commands[length(commands) - 1] + '\n');
+
+// A stash older than 15 minutes is dropped
+mocklib.capture('/var/run/mwan4.state/stamp', (time() - 901) + '\n');
+mocklib.delete_captured('/var/run/mwan4track/wan_ipv4/STATUS');
+m.restore_state();
+print('stale stash restored anything: ' + (get('/var/run/mwan4track/wan_ipv4/STATUS') != '-') + '\n');
+print('stale stash removed: ' + commands[length(commands) - 1] + '\n');
+-- End --
+
+-- Expect stdout --
+stashed: held,quality,stamp,track
+stashed trackers: gone_ipv4,wan_ipv4,wan_ipv6,wanb_ipv4,wanc_ipv4
+stashed files of a tracker: ONLINE,SCORE,STATUS
+restored wan_ipv4: online score 9 online 120
+restored wan_ipv6: online
+probe results are not carried: - pid -
+wanb is down: -
+wanc is disabled: -
+removed interface: - / hold -
+hold: flapping 1793180000
+quality: wan_only 1.50
+stash removed: rm -rf '/var/run/mwan4.state'
+stale stash restored anything: false
+stale stash removed: rm -rf '/var/run/mwan4.state'
+-- End --

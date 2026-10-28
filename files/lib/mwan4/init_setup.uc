@@ -12,6 +12,7 @@ import stability from 'stability';
 m.set_scriptname('mwan4-init');
 m.init();
 stability.history_restore();
+m.restore_state();
 
 m.update_iface_to_table();
 m.set_general_rules();

@@ -11,6 +11,9 @@ import stability from 'stability';
 m.set_scriptname('mwan4-init');
 m.init();
 
+// A start within minutes takes the tracker verdicts and holds over (the state dirs are wiped below)
+m.stash_state();
+
 // Remove only endpoints previously created by mwan4. This avoids flushing
 // externally managed MPTCP endpoints.
 m.remove_mptcp_managed_endpoints();
