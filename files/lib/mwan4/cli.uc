@@ -26,6 +26,7 @@ function cmd_help() {
 	command_help('ifdown <iface>',   'Unload rules and routes for specific interface');
 	command_help('interfaces',       'Show interfaces status');
 	command_help('strategies',       'Show currently active strategy');
+	command_help('history [iface]',  'Show link transitions, flaps, availability and holds');
 	command_help('connected',        'Show directly connected networks');
 	command_help('rules',            'Show active rules');
 	command_help('connections [key=value...]', 'List tracked connections (rule, interface, strategy, family, proto, search, limit, offset)');
@@ -86,6 +87,35 @@ function cmd_strategies() {
 		println('Current ipv6 strategies:');
 		for (let line in m.report_strategies('ipv6'))
 			println(line);
+		println('');
+	}
+}
+
+function format_time(epoch) {
+	let t = localtime(epoch);
+	return sprintf('%04d-%02d-%02d %02d:%02d:%02d', t.year, t.mon, t.mday, t.hour, t.min, t.sec);
+}
+
+function percent(value) {
+	return value == null ? 'n/a' : value + '%';
+}
+
+function history_header(name, data) {
+	let held = data.held.active ? sprintf(', held (%s, %ds left)', data.held.reason, data.held.remaining) : '';
+	return sprintf('%s: %d flaps in window (%d total), availability 1h %s, 24h %s%s', name, data.flaps.count_window, data.flaps.total,
+		percent(data.availability.pct_1h), percent(data.availability.pct_24h), held);
+}
+
+function cmd_history(args) {
+	if (length(args) > 1 || (length(args) && !m.validate_section_name(args[0]))) {
+		println('Error: Usage: mwan4 history [interface]');
+		return;
+	}
+	let result = m.get_link_history({ interface: args[0] });
+	for (let name in sort(keys(result.interfaces))) {
+		println(history_header(name, result.interfaces[name]));
+		for (let e in result.interfaces[name].events)
+			println(sprintf('  %s %-9s %s', format_time(e.time), e.state, e.reason));
 		println('');
 	}
 }
@@ -321,6 +351,7 @@ case 'ifup':
 case 'ifdown':
 case 'interfaces':
 case 'strategies':
+case 'history':
 case 'connected':
 case 'rules':
 case 'connections':
@@ -341,6 +372,7 @@ case 'internal':
 	case 'ifdown':      cmd_ifdown(args); break;
 	case 'interfaces':  cmd_interfaces(); break;
 	case 'strategies':  cmd_strategies(); break;
+	case 'history':     cmd_history(args); break;
 	case 'connected':   cmd_connected(); break;
 	case 'rules':       cmd_rules(); break;
 	case 'connections': cmd_connections(args); break;

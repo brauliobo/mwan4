@@ -3163,7 +3163,7 @@ function report_iface_status() {
 				msg = sprintf(' interface %s (%s) is %s and tracking is %s (%s)', iface, family, iface_st, tracking, detail);
 			else
 				msg = sprintf(' interface %s (%s) is %s and tracking is %s', iface, family, iface_st, tracking);
-			push(result, sprintf('%s, %d active connections', msg, interface_active(iface)[family]));
+			push(result, sprintf('%s, %d active connections%s', msg, interface_active(iface)[family], stability_note(iface)));
 		});
 	});
 	return result;
@@ -3735,7 +3735,10 @@ function get_interfaces_status(args, procd) {
 			'recovery_latency': int(intf.recovery_latency || '500'),
 			'recovery_loss':   int(intf.recovery_loss || '10'),
 			'active_connections': interface_active(ifname),
+			...link_stability(ifname, stability.history_events(ifname)),
 		};
+		if (data.held.active)
+			data.health_state = 'held';
 
 		let tunnel = get_tunnel_metadata(intf);
 		if (tunnel?.configured)
@@ -4220,6 +4223,12 @@ function get_capabilities() {
 			'limit_default': CONNECTIONS_DEFAULT_LIMIT,
 			'limit_max':     CONNECTIONS_MAX_LIMIT,
 			'filters':       ['rule', 'interface', 'strategy', 'family', 'proto', 'search'],
+		},
+		'stability': {
+			'link_history':  true,
+			'history_max':   stability.HISTORY_MAX,
+			'defaults':      stability.DEFAULTS,
+			'strategy_options': ['max_latency', 'max_loss'],
 		},
 	};
 }

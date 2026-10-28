@@ -34,6 +34,10 @@ function connections_call(request) {
 	return m.get_connections(rpc_args(request));
 }
 
+function link_history_call(request) {
+	return m.get_link_history(rpc_args(request));
+}
+
 function capabilities_call(request) {
 	return m.get_capabilities();
 }
@@ -82,6 +86,14 @@ const methods = {
 			offset:    0,
 		},
 		call: fresh(connections_call),
+	},
+	link_history: {
+		args: {
+			interface: 'interface',
+			since:     0,
+			limit:     0,
+		},
+		call: fresh(link_history_call),
 	},
 	capabilities: {
 		args: {},

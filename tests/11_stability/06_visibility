@@ -1,0 +1,100 @@
+Testing the visibility surface: interface status fields, the link_history rpc, the capabilities block and the interfaces report.
+
+-- File uci/mwan4.json --
+{
+	"globals": [{ ".name": "globals", "mmx_mask": "0x3F00" }],
+	"interface": [
+		{ ".name": "wan", "enabled": "1", "id": "1", "table_id": "1", "mark": "0x100", "family": ["ipv4"], "track_ip": ["1.1.1.1", "8.8.8.8"], "flap_window": "600" },
+		{ ".name": "wanb", "enabled": "1", "id": "2", "table_id": "2", "mark": "0x200", "family": ["ipv4"], "track_ip": ["1.1.1.1", "8.8.8.8"] }
+	],
+	"route": [
+		{ ".name": "wan_r", "interface": "wan", "metric": "1", "weight": "1" },
+		{ ".name": "wanb_r", "interface": "wanb", "metric": "2", "weight": "1" }
+	],
+	"strategy": [
+		{ ".name": "fast", "use_route": ["wan_r", "wanb_r"], "max_latency": "100" }
+	]
+}
+-- End --
+
+-- File ubus/network.interface.wan_4~status.json --
+{ "up": true, "l3_device": "eth0" }
+-- End --
+
+-- File ubus/network.interface.wanb_4~status.json --
+{ "up": true, "l3_device": "eth1" }
+-- End --
+
+-- Testcase --
+import m from 'mwan4';
+import stability from 'stability';
+m.set_scriptname('test');
+m.init();
+
+let now = 1000000;
+global.time = () => now;
+let at = t => { now = 1000000 + t; };
+
+let rpcd = require('rpcd_mwan4').mwan4;
+
+stability.link_connected('wan', m.stability_opts('wan'), true, now);
+at(100); m.set_iface_hotplug_state('wan', 'offline'); stability.link_disconnected('wan', 'probe', now);
+at(200); m.set_iface_hotplug_state('wan', 'online'); stability.link_connected('wan', m.stability_opts('wan'), false, now);
+at(210); stability.quality_write('wan', { fast: 1.5 }); stability.link_quality_changed('wan', now);
+at(220);
+
+let status = m.get_status({ section: 'interfaces' });
+let wan = status.interfaces.wan, wanb = status.interfaces.wanb;
+print('wan health_state: ' + wan.health_state + ' status: ' + wan.status + '\n');
+print('wan held: ' + sprintf('%J', wan.held) + '\n');
+print('wan flaps: ' + sprintf('%J', wan.flaps) + '\n');
+print('wan availability: ' + sprintf('%J', wan.availability) + '\n');
+print('wan degraded_for: ' + sprintf('%J', wan.degraded_for) + '\n');
+print('wanb flaps: ' + sprintf('%J', wanb.flaps) + ' held: ' + wanb.held.active + ' degraded_for: ' + sprintf('%J', wanb.degraded_for) + '\n');
+
+print('\nlink_history method: ' + (exists(rpcd, 'link_history') ? 'yes' : 'no') + '\n');
+let all = rpcd.link_history.call({ args: {} });
+print('ok: ' + all.ok + ' interfaces: ' + join(',', sort(keys(all.interfaces))) + '\n');
+let one = rpcd.link_history.call({ args: { interface: 'wan' } }).interfaces.wan;
+print('keys: ' + join(',', sort(keys(one))) + '\n');
+for (let e in one.events)
+	print(sprintf('  %d %s %s\n', e.time, e.state, e.reason));
+print('since 1000150: ' + join(',', map(rpcd.link_history.call({ args: { interface: 'wan', since: 1000150 } }).interfaces.wan.events, e => e.state)) + '\n');
+print('limit 2: ' + join(',', map(rpcd.link_history.call({ args: { interface: 'wan', limit: 2 } }).interfaces.wan.events, e => e.state)) + '\n');
+print('unknown interface: ' + sprintf('%J', rpcd.link_history.call({ args: { interface: 'nope' } })) + '\n');
+
+let caps = rpcd.capabilities.call({ args: {} }).stability;
+print('\ncapabilities: link_history=' + caps.link_history + ' defaults=' + sprintf('%J', caps.defaults) + '\n');
+
+print('\ninterfaces report:\n');
+global.system = cmd => 0;
+for (let line in m.report_iface_status())
+	print(replace(line, /^ interface (\w+).*, ([0-9]+ active connections)/, '$1: $2') + '\n');
+-- End --
+
+-- Expect stdout --
+wan health_state: held status: unknown
+wan held: { "active": true, "reason": "recovering", "until": 1000230, "remaining": 10 }
+wan flaps: { "count_window": 1, "total": 1 }
+wan availability: { "pct_1h": 54.5, "pct_24h": 54.5 }
+wan degraded_for: [ "fast" ]
+wanb flaps: { "count_window": 0, "total": 0 } held: false degraded_for: [ ]
+
+link_history method: yes
+ok: true interfaces: wan,wanb
+keys: availability,degraded_for,events,flaps,held
+  1000000 online start
+  1000100 offline probe
+  1000200 online recovered
+  1000200 held recovering
+  1000210 degraded fast
+since 1000150: online,held,degraded
+limit 2: held,degraded
+unknown interface: { "ok": true, "interfaces": { } }
+
+capabilities: link_history=true defaults={ "flap_damping": 1, "flap_threshold": 3, "flap_window": 300, "flap_holddown": 120, "recovery_hold": 30, "flush_grace": 10, "quality_hold": 30 }
+
+interfaces report:
+wan: 0 active connections, held (recovering, 10s left), degraded for fast, 1 flaps in 600s, availability 24h 54.5%
+wanb: 0 active connections
+-- End --
